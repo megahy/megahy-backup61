@@ -2,7 +2,7 @@
 <img width="284" height="376" alt="image" src="https://github.com/user-attachments/assets/17198d0c-4aa4-45db-a30e-a13a44b9c1f4" />
 
 *0.3.1-rc2 | Pre-release. Tested by the author on a real Windows PC and Android phone.*
-Selective Android USB file backup for Windows PCs, prepared for Marwan Megahy.
+Selective Android USB file backup for Windows PCs.
 
 Copy readable photos, videos and other shared-storage files to your own PC. Each verified storage file must have matching SHA-256 hashes on the phone before and after copying and on the PC. Contacts, SMS, MMS and call logs are optional best-effort exports, only when Android already permits access.
 
