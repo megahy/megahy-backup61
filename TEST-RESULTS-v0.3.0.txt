@@ -1,0 +1,109 @@
+megahy-backup 0.3.0 preview
+Test report, 22 November 2026
+
+PASS: 55 automated regression tests.
+PASS: 14 original independent process-level synthetic-device scenarios.
+PASS: 19 additional selection/pause/ETA process/browser scenario groups.
+PASS: Source compilation and ZIP integrity checks (packaging step).
+These counts are software test results, NOT a phone compatibility/success rate.
+
+WHAT EXECUTED
+The real megahy_backup.py app ran as a separate Linux process with Python 3.10.12.
+A separate executable accepted its ADB command arguments, using generated real
+files and a read-only SQLite provider database. It did not override Engine in
+these process tests. Browser checks used the actual local UI and API.
+This was not an Android OS/emulator, real ADB client/server, USB, Windows or Redmi.
+No physical phone was connected, installed on, created on, deleted from or reset.
+
+ETA AND COLOUR CHECKS
+- Controlled-clock tests cover learning/warm-up, file-count and byte-sensitive
+  estimates, large-byte guard, unknown sizes, failed attempts and Pause exclusion.
+- A live browser run showed a numerical rough ETA while copying, with measured
+  total bytes and verified bytes. No fixed speed from an earlier run was used.
+- Missing optional stat metadata did not prevent all 8 selected photos copying.
+- While paused, active-copy time and the estimate froze rather than counting
+  the paused duration as slow transfer time.
+- Browser style assertions verified green success counts and red failure counts.
+- ETA accuracy on a real phone or long copy has not been measured. The estimate
+  excludes scanning/providers/preparation/final checks and may change widely.
+
+SELECTION SCENARIOS
+- Photos only: exactly 8 matching fixture images copied, 6 nonmatching files
+  excluded, and no provider queried.
+- Videos only: exactly 3 fixture videos copied.
+- Photos/videos with hidden/cache exclusions: exactly 7 selected files copied;
+  hidden and cache exclusions both recorded. No excluded file was pulled.
+- One /sdcard/DCIM folder: exactly its 5 fixture files copied; original
+  volume-relative DCIM paths preserved. No other storage root scanned.
+- /storage/emulated/0/DCIM alias: same 5 expected files.
+- A folder with spaces, Arabic, an apostrophe and a dollar sign: its one file
+  copied without shell interpretation or unrelated folder reads.
+- SMS-only, contacts-only, MMS-only and call-log-only runs: only that selected
+  provider was queried. No storage scan, hash or pull, even when the simulated
+  phone lacked the shared-storage SHA-256 utility.
+- Contacts-only with a permission denial: Error, incomplete; other providers
+  marked not selected, not silently queried or called backed up.
+- Empty selection, private path, traversal path and invalid checkbox type:
+  rejected with HTTP 400 before any device command or backup folder creation.
+
+PAUSE/RESUME/STOP SCENARIOS
+Each file-phase case paused during a slow simulated ADB pull. The current pull
+finished; then the app stopped before the next device operation.
+- While actually Paused, the device-command log stayed unchanged. A copied file
+  existed only as .partial, with zero files claimed hash verified at that point.
+- Resume checked the pinned device and completed all 5 selected folder files.
+- Stop while paused ended Stopped, incomplete, with zero files falsely verified.
+- Unplug while paused, then Resume: pinned-device check failed; Error, incomplete,
+  zero verified files, one failed pending file. Partial bytes were not promoted.
+- Source changed while paused, then Resume: that file failed hash verification;
+  only the other 4 unchanged selected files were verified.
+- Pause and Stop during an SMS provider export: Stopped, incomplete. The provider
+  was marked incomplete rather than left showing reading or exported.
+The UI distinguished Pausing safely from Paused and provided Resume and Stop.
+Pause waits for a current operation. It is not instantaneous and is not durable
+resume after closing the app, rebooting, Stop or an error.
+
+ORIGINAL PROCESS-LEVEL REGRESSIONS RERUN ON THIS VERSION
+- 57 odd/large synthetic files, including an actual 128 MiB payload, SD-card
+  data, empty files, deep/long paths, Arabic/Japanese/emoji, tabs/newlines,
+  apostrophes/quotes, shell-looking text, reserved Windows names, percent signs,
+  trailing spaces/dots and case collisions: all 57 copied and independently
+  hashed against the original fixture files.
+- 1,024 SMS records checked field-for-field, including null versus literal NULL,
+  multiline/trailing-newline/Unicode text, embedded NUL and formula-like strings.
+- 3 vCards, 6 calls, 2 MMS messages and 2 hash-checked MMS binary attachments.
+- Provider permission errors with exit zero, rejected computed projections with
+  single-field fallback, denied MMS binary parts, corrupted copied bytes,
+  changing source bytes, a disconnect, Stop, added-file rescan, unreadable
+  directory/unknown volume, missing hash/find utilities, unauthorized phone
+  and injected full-disk error. Failures were reported without verifying bad bytes.
+
+UNIT/LOCAL API CHECKS
+Prior storage/provider/API safeguards, selection validation, extension matching,
+opt-in hidden/cache exclusions, exact folder scope, unselected-provider silence,
+provider-only storage silence, partial/denied exports, interrupted provider
+status, cooperative pause gating, device check on Resume, Stop while paused,
+and keeping the run busy until the final report finishes.
+
+VISUAL CHECKS
+Actual desktop browser UI inspected for photos-only, SMS-only, Paused, numerical
+ETA and unplug-after-Pause error states. Green/red values were visible.
+320px and 390px mobile layouts checked with the actual UI, without horizontal
+page overflow. Test screenshots are explicitly marked synthetic.
+
+WHAT REMAINS UNTESTED
+- Windows execution of START-megahy-backup.cmd and bundled Python 3.14.10.
+- Actual Windows filesystems, native path handling, drivers and USB authorization.
+- Real ADB transport, Android/MIUI provider implementations or permission rules.
+- Real-phone completeness, secure/work profiles, cloud-only/private app data.
+- Huge libraries, multi-GB videos, sustained throughput or a physically full disk.
+  The full-disk scenario was an injected subprocess error, not actual exhaustion.
+- Any Android/Xiaomi import, restoration or recovery. Provider archives are not
+  proven restore backups. No safe-to-reset conclusion follows from these tests.
+
+REPRODUCING
+python -m unittest discover -s tests -v
+See tests/device_lab/README.txt for POSIX/Linux process-test prerequisites.
+The application itself uses the standard library; Playwright is only needed for
+browser testing, not to run the Windows app. Generated fixtures are not in ZIP.
+
