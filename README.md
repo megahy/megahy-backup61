@@ -1,7 +1,7 @@
 # megahy-backup
+<img width="284" height="376" alt="image" src="https://github.com/user-attachments/assets/17198d0c-4aa4-45db-a30e-a13a44b9c1f4" />
 
-**0.3.1-rc2 | Private release candidate, not yet published**
-
+*0.3.1-rc2 | Pre-release. Tested by the author on a real Windows PC and Android phone.*
 Selective Android USB file backup for Windows PCs, prepared for Marwan Megahy.
 
 Copy readable photos, videos and other shared-storage files to your own PC. Each verified storage file must have matching SHA-256 hashes on the phone before and after copying and on the PC. Contacts, SMS, MMS and call logs are optional best-effort exports, only when Android already permits access.
@@ -10,7 +10,7 @@ Copy readable photos, videos and other shared-storage files to your own PC. Each
 
 | PC | Status |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | Intended packaged target. Python is included; no Python or pip installation is needed. This candidate has not been tested on a physical Windows PC. |
+| Windows 10/11, Intel/AMD 64-bit | Intended packaged target. Python is included; no Python or pip installation is needed. Tested by the author on one Windows PC. |
 | Windows ARM64 | Not validated. This is an x64 package, not a native ARM64 build. Do not promise compatibility. |
 | 32-bit Windows or Windows 7/8/8.1 | Not supported by this release package. |
 | macOS / Linux | No ready-to-run package included. The Python source is portable in principle, but requires a supported Python installation, that OS's official ADB, USB permissions and testing. The Windows launcher/runtime do not run natively there. |
