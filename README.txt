@@ -1,21 +1,22 @@
-megahy-backup 0.3.1-rc2
-PRIVATE RELEASE CANDIDATE: owner approval required before publishing.
+megahy-backup 0.4.0-rc3
+RELEASE CANDIDATE. New features are simulation-tested only.
 Start with README.md for supported PCs, rights and current test status.
 
 SETUP ONCE
 1. Extract the entire ZIP into a new folder on a 64-bit Intel/AMD Windows 10/11
    PC. Open the extracted folder containing START-megahy-backup.cmd, ui.html,
    megahy_backup.py and runtime. Do not run it from inside the ZIP.
-2. Download Google's official Platform-Tools for Windows:
-   https://developer.android.com/tools/releases/platform-tools
-   Accept Google's terms and extract the whole platform-tools folder next to
+2. Add Google's ADB (Platform-Tools). Easiest: start the app and click
+   "Download ADB automatically"; it downloads the official ZIP from Google,
+   checks it and installs it next to the app. Manual alternative: download
+   https://developer.android.com/tools/releases/platform-tools yourself,
+   accept Google's terms and extract the whole platform-tools folder next to
    START-megahy-backup.cmd. Keep adb.exe and its accompanying DLLs together.
-   You may copy the complete platform-tools folder from your old app folder
-   after its backup has finished. A separate Python install is not needed.
+   A separate Python install is not needed.
 3. On the phone, enable Developer options and ordinary USB debugging. The exact Settings labels vary by phone maker; use its official instructions. Use a data cable,
    unlock the phone and accept this PC's USB debugging authorization.
-   Leave Install via USB, debugging security/input-control toggles, OEM unlocking
-   and MIUI optimization alone. This read-only app does not need them.
+   Leave Install via USB, debugging security/input-control toggles and OEM
+   unlocking alone. This read-only app does not need them.
 4. Connect only one USB phone. If ADB cannot see it, check the cable, authorization
    and the manufacturer's Windows ADB driver. Seeing files in Explorer is not
    proof that the ADB driver is installed. Do not disable antivirus or install
@@ -75,8 +76,8 @@ START, PAUSE, RESUME, STOP
    and is available, pending reads can continue, but changed files can fail
    their hashes. Earlier copies are not revalidated as a phone-wide snapshot.
 5. Resume continues only this still-open running session. It does not resume
-   after closing the console, rebooting, an error or Stop. There is no persistent
-   resume/deduplication feature.
+   after closing the console, rebooting, an error or Stop. For repeat backups,
+   use Incremental mode instead: unchanged files are skipped.
 6. Stop ends the current run, including while paused. Already verified files
    remain. In-flight files are not called verified. A later Start creates a new
    backup; it does not continue the stopped one.
@@ -137,12 +138,28 @@ source-sizes-reference.json (optional measured sizes for the ETA, not a snapshot
   before a storage file is marked verified. Provider exports do not have this
   source-versus-PC checksum/completeness proof.
 
+NEW IN 0.4.0
+- Incremental backup (on by default): skips files proven unchanged since an
+  earlier verified backup in the same destination. Proof is size+modification
+  time, or a SHA-256 match when timestamps are unavailable. Skipped files are
+  not re-copied; the manifest names the earlier folder that holds them. A change
+  that keeps size and date identical can be missed, as with any incremental tool.
+- Original file dates: verified copies carry the phone's modification time.
+- Wi-Fi (Android 11+): Developer options, Wireless debugging. Pair once with
+  the pairing IP/port/code, then Connect with the connect port. USB is unchanged.
+- Restore: copies verified files of a chosen backup into a dated folder on the
+  phone and re-verifies each hash. It does not restore app data, contacts or
+  messages into their apps, and it writes to the phone (backups never do).
+- Scheduled backups: creates a Windows Task Scheduler entry that runs
+  "megahy_backup.py --auto" with your saved settings. The phone must be
+  connected and authorized at that time. Remove it any time from the app.
+- Profiles, dark mode, Arabic interface, free-space precheck.
+
 STILL NOT EXTRACTED
 Private app data, installed apps, app logins/passwords, authenticator secrets,
 WhatsApp/Signal app chat databases, accounts, eSIMs and system settings. Work
 profiles, secure folders, other users, cloud-only and unreadable files may be
-absent. Existing readable MIUI backup files are copied only if selected; the
-app never creates or validates a Xiaomi backup. Provider archives are not
+absent. Provider archives are not
 promised Android/Xiaomi-importable backups. No restoration has been tested.
 
 PRIVACY AND SAFETY
@@ -153,11 +170,14 @@ filenames are not encrypted; protect your PC disk. Disable USB debugging when
 finished. Keep enough disk space; a recognized full-disk ADB error aborts the run.
 
 TESTING
-Historic v0.3.0: 55 automated regression tests and 33 process-level synthetic-device scenario
-checks passed for v0.3.0, including selection and Pause/Resume/Stop checks.
-See TESTING.md and TEST-RESULTS-v0.3.0.txt. These are software tests, not a real phone success rate.
+0.4.0-rc3: 23 automated checks passed on Linux with a synthetic ADB device,
+re-running the core backup suite plus the two rc3 changes (see TESTING.md).
+The Browse picker front-of-browser fix is verified by code inspection only and
+awaits a real Windows PC. rc2 had 27 checks; rc1 had 39. Historic v0.3.0: 55
+automated regression tests and 33 scenario checks. These are software
+simulations, not a real phone success rate.
 Tests ran on Linux/Python 3.10.12 with a separate synthetic ADB command process.
-The new Windows runtime/launcher, real ADB/USB, real Android/MIUI providers,
+The new Windows runtime/launcher, real ADB/USB, real Android providers,
 phone completeness, multi-GB files, huge libraries and restoration are untested.
 The ZIP includes source and test fixtures, not generated synthetic datasets.
 
@@ -169,6 +189,5 @@ https://developer.android.com/reference/android/provider/ContactsContract.Contac
 https://developer.android.com/reference/android/provider/Telephony.Sms
 https://developer.android.com/reference/android/provider/Telephony.Mms.Part
 https://developer.android.com/reference/android/provider/CallLog.Calls
-https://www.mi.com/global/support/article/KA-11580/
 https://www.python.org/downloads/release/python-31410/
 

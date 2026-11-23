@@ -1,9 +1,8 @@
-# Copyright (c) 2026 CableVault contributors and Marwan Megahy
+# Copyright (c) 2026 Marwan Megahy
 # SPDX-License-Identifier: GPL-3.0-or-later
 # This program is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License version 3 or (at your option) any later
-# version. See LICENSE.txt. Code inherited from the CableVault preview remains under
-# the MIT license; see NOTICE.txt.
+# version. See LICENSE.txt.
 """Rough, pause-aware copy ETA from observed file and byte rates. No benchmark."""
 import math
 import threading

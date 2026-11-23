@@ -1,0 +1,33 @@
+megahy-backup 0.4.0-rc3
+Test report, 23 November 2026
+
+Scope of this report: the rc3 changes (in-app notice text; the Browse picker
+opening in front of the browser) plus a regression re-run of the core backup
+suite. rc1/rc2 results still stand for unchanged behavior; see TESTING.md.
+These counts are software test results, NOT a phone compatibility/success rate.
+
+PASS: 23 automated checks (Linux, standard library only, synthetic ADB
+process and a mirror phone filesystem):
+- All app modules compile; version 0.4.0-rc3 consistent across app, UI,
+  README, README.txt, CHANGELOG, SOURCE-NOTES and the .cmd launcher.
+- In-app notice: the removed sentence is absent in English and Arabic; the
+  rest of the notice is unchanged; the per-feature "tested only in
+  simulation" hints are kept.
+- pick_folder(): the generated command shows the picker owned by an invisible
+  top-most window (the rc3 fix); the non-Windows fallback error is intact.
+- Full backup of a 5-file simulated phone, every file hash-verified, Arabic
+  filename included; modification dates preserved exactly.
+- Incremental: unchanged files skipped, a size change re-copies one file, a
+  same-size content change is caught by hash, incremental-off re-copies all.
+- Wi-Fi pair/connect validation and a photos-only backup over the Wi-Fi
+  serial. Restore of 5 files with phone-side SHA-256 re-verification.
+- Provider categories complete cleanly when the phone returns no records.
+- Headless --auto backup with the platform-tools layout; last-auto-run.json
+  written. Local API token auth, acknowledgement requirement, fallback
+  errors and 404s.
+
+NOT TESTED (the important one for rc3):
+- The real Windows FolderBrowserDialog. The front-of-browser fix is verified
+  by inspection of the generated command only. Try the Browse... button on a
+  real Windows PC before calling rc3 stable.
+- A real phone, real ADB, real USB/Wi-Fi, real Windows, Task Scheduler.

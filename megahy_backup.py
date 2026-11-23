@@ -1,10 +1,9 @@
-# Copyright (c) 2026 CableVault contributors and Marwan Megahy
+# Copyright (c) 2026 Marwan Megahy
 # SPDX-License-Identifier: GPL-3.0-or-later
 # This program is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License version 3 or (at your option) any later
-# version. See LICENSE.txt. Code inherited from the CableVault preview remains under
-# the MIT license; see NOTICE.txt.
-"""megahy-backup 0.3.1-rc2 preview. Standard-library-only, read-only Android USB backup."""
+# version. See LICENSE.txt.
+"""megahy-backup 0.4.0-rc3. Standard-library-only Android backup for Windows PCs."""
 from __future__ import annotations
 import argparse
 import datetime as dt
@@ -27,11 +26,15 @@ import webbrowser
 # Support the bundled isolated Windows interpreter and source execution.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import selection
+import settings as app_settings
+import adbtools
+import scheduler
 from eta import CopyProgress
 
 # Keep cancellation types identical when launched as a script.
 sys.modules.setdefault('megahy_backup', sys.modules[__name__])
 BASE = Path(__file__).resolve().parent
+VERSION = '0.4.0-rc3'
 GAPS = [
     'This is a file backup, not a full phone clone or a reset-safety certificate.',
     'Private app data, installed apps, logins, passwords, authenticator secrets, WhatsApp/Signal chats, system settings and eSIMs are not extracted. Contacts, SMS, MMS and call-log provider exports are attempted only when the Android shell is already allowed to read them.',
@@ -40,7 +43,8 @@ GAPS = [
     'Android may deny access or hide files from the shell even inside shared storage. Unreadable files may be absent. Empty directories are not copied.',
     'Only the chosen categories and folders are attempted. Media filters use filename extensions, not content. Hidden/cache exclusions may omit wanted files; they never delete or free space on the phone.',
     'A live phone is not a snapshot. Stop using it during backup, then check important files and each app backup before considering a reset.',
-    'Backups are not encrypted by this app. Protect the backup disk. This app has no automatic restore; files can be copied back, but app-specific restoration needs its own tools.'
+    'Incremental mode skips files whose size and modification time (or content hash) match an earlier verified backup in the same destination. It cannot detect every possible change; when in doubt, run with incremental off.',
+    'Backups are not encrypted by this app. Protect the backup disk. Restore copies verified files back to a phone folder you choose; it does not restore app data, contacts, messages or settings into their apps.'
 ]
 
 class BackupError(Exception):
@@ -103,10 +107,65 @@ class NameMapper:
         return Path(*mapped)
 
 
+HOST_RE = re.compile(r'^[0-9A-Za-z]([0-9A-Za-z.\-]{0,251}[0-9A-Za-z])?$')
+
+
+def validate_host_port(host, port):
+    if not isinstance(host, str) or not HOST_RE.fullmatch(host):
+        raise ValueError('Enter a valid phone IP address or host name')
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise ValueError('Enter a valid port number')
+    if not 1 <= port <= 65535:
+        raise ValueError('Port must be between 1 and 65535')
+    return host, port
+
+
+def pick_folder():
+    """Open the Windows folder picker and return the chosen path.
+
+    Returns '' when the user cancels the dialog. Raises BackupError when no
+    picker is available, so the caller can fall back to typing the path.
+    """
+    if os.name != 'nt':
+        raise BackupError('The folder picker is only available on Windows. Type the folder path instead.')
+    command = (
+        'Add-Type -AssemblyName System.Windows.Forms;'
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
+        "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description='Choose the folder where your backups are kept';"
+        '$d.ShowNewFolderButton=$true;'
+        # An invisible top-most owner window keeps the picker in front of the
+        # browser window; in rc2 it could open behind it (owner-reported).
+        '$o=New-Object System.Windows.Forms.Form;'
+        '$o.TopMost=$true;'
+        '$o.ShowInTaskbar=$false;'
+        '$h=$o.Handle;'
+        '$r=$d.ShowDialog($o);'
+        '$o.Dispose();'
+        'if($r -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.SelectedPath)}'
+    )
+    try:
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-STA', '-Command', command],
+            capture_output=True, timeout=600,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise BackupError('The folder picker could not open. Type the folder path instead.') from e
+    if result.returncode != 0:
+        raise BackupError('The folder picker could not open. Type the folder path instead.')
+    path = result.stdout.decode('utf-8', 'replace').strip()
+    if path and not re.fullmatch(r'[^\x00-\x1f]*', path):
+        raise BackupError('The folder picker returned an unreadable path. Type the folder path instead.')
+    return path
+
+
 class Engine:
     def __init__(self, adb=None):
         self.adb = adb
         self.serial = None
+        self.wireless = False
         self.options = selection.defaults()
         self.progress = CopyProgress()
         self.stop = threading.Event()
@@ -114,8 +173,13 @@ class Engine:
         self.resume_gate.set()
         self.resume_check = False
         self.lock = threading.Lock()
-        self.state = dict(phase='Ready', detail='Connect one unlocked Android phone by USB.', running=False,
-                          total=0, done=0, verified=0, failed=0, vcf=0, folder='', warnings=[], recent=[], categories={}, miui_backup_files=0, scanned=0, excluded=0, paused=False, pause_requested=False, selection=selection.defaults())
+        self.previous = {}
+        self.state = dict(phase='Ready', detail='Connect one unlocked Android phone by USB, or use Wi-Fi.',
+                          running=False, mode='backup',
+                          total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder='',
+                          warnings=[], recent=[], categories={}, scanned=0, excluded=0,
+                          paused=False, pause_requested=False, selection=selection.defaults(),
+                          adb_setup=None)
 
     def update(self, **kw):
         with self.lock:
@@ -174,7 +238,7 @@ class Engine:
             if self.serial:
                 code, out, _ = self.invoke(['get-state'], timeout=15)
                 if code or out.strip() != b'device':
-                    raise DeviceDisconnected('Phone unavailable after Pause. This backup is incomplete. Reconnect and start a new run; no partial file is verified.')
+                    raise DeviceDisconnected('Phone unavailable after Pause. This run is incomplete. Reconnect and start a new run; no partial file is verified.')
         return self.invoke(args, timeout=timeout, device=device)
 
     def invoke(self, args, timeout=120, device=True):
@@ -192,7 +256,7 @@ class Engine:
                     p.wait()
                     if self.stop.is_set():
                         raise Cancelled('Stopped by user')
-                    raise BackupError('ADB timed out. Check the cable and phone; this run is incomplete.')
+                    raise BackupError('ADB timed out. Check the connection and phone; this run is incomplete.')
                 time.sleep(.08)
             out.seek(0)
             err.seek(0)
@@ -201,21 +265,74 @@ class Engine:
     def shell(self, command, timeout=120):
         return self.run(['shell', command], timeout=timeout)
 
-    def connect(self):
-        choices = [BASE / 'platform-tools' / 'adb.exe', BASE / 'platform-tools' / 'adb',
-                   BASE / 'adb.exe']
-        self.adb = self.adb or next((str(p) for p in choices if p.is_file()), None) or shutil.which('adb')
+    def ensure_adb(self):
         if not self.adb:
-            raise BackupError('ADB not found. Download Google Platform-Tools and place its platform-tools folder next to START-megahy-backup.cmd. See README.txt.')
-        code, out, err = self.run(['-d', 'get-serialno'], device=False)
-        serial = out.decode('utf-8', 'replace').strip()
-        if code or not serial or serial == 'unknown':
-            raise BackupError('Connect exactly ONE USB phone, unlock it and accept Allow USB debugging. If it is still missing, check the cable and manufacturer USB driver. ADB: ' + err.decode('utf-8', 'replace')[:400])
-        self.serial = serial
+            found = adbtools.find_adb(BASE)
+            if not found:
+                raise BackupError('ADB not found. Use "Download ADB automatically" in the setup card, or place Google Platform-Tools next to START-megahy-backup.cmd. See README.txt.')
+            self.adb = found
+        return self.adb
+
+    def setup_adb_async(self):
+        """Download and install Google Platform-Tools in the background."""
+        with self.lock:
+            if self.state.get('adb_setup') and self.state['adb_setup'].get('stage') in ('downloading', 'installing'):
+                raise ValueError('ADB setup is already running')
+        def work():
+            try:
+                def progress(percent, stage):
+                    self.update(adb_setup={'stage': stage, 'percent': percent, 'error': None})
+                adb = adbtools.download_and_install(BASE, progress)
+                self.adb = adb
+                self.update(adb_setup={'stage': 'ready', 'percent': 100, 'error': None})
+            except Exception as e:
+                self.update(adb_setup={'stage': 'error', 'percent': None, 'error': str(e)})
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def pair_wifi(self, host, port, code):
+        """Android 11+ wireless debugging pairing. Untested on real hardware."""
+        host, port = validate_host_port(host, port)
+        if not isinstance(code, str) or not re.fullmatch(r'\d{6}', code.strip()):
+            raise ValueError('Enter the 6-digit pairing code shown on the phone')
+        self.ensure_adb()
+        rc, out, err = self.invoke(['pair', host + ':' + str(port), code.strip()], timeout=60, device=False)
+        text = (out + err).decode('utf-8', 'replace')
+        if rc or 'success' not in text.lower():
+            raise BackupError('Pairing failed: ' + text.strip()[:400])
+        return True
+
+    def connect_wifi(self, host, port):
+        """Connect to a phone over Wi-Fi (wireless debugging). Untested on real hardware."""
+        host, port = validate_host_port(host, port)
+        self.ensure_adb()
+        rc, out, err = self.invoke(['connect', host + ':' + str(port)], timeout=60, device=False)
+        text = (out + err).decode('utf-8', 'replace').lower()
+        if rc or 'connected' not in text or 'cannot' in text or 'failed' in text or 'refused' in text:
+            raise BackupError('Wi-Fi connect failed: ' + (out + err).decode('utf-8', 'replace').strip()[:400])
+        self.serial = host + ':' + str(port)
+        self.wireless = True
+        return self.serial
+
+    def connect(self):
+        self.ensure_adb()
+        if self.wireless and self.serial:
+            code, out, err = self.run(['devices'], device=False)
+            listing = out.decode('utf-8', 'replace')
+            if code or not re.search(r'^' + re.escape(self.serial) + r'\s+device\s*$', listing, re.M):
+                self.wireless = False
+                self.serial = None
+                raise BackupError('The Wi-Fi phone is no longer connected. Reconnect it from the Wi-Fi card, or plug in USB.')
+        else:
+            code, out, err = self.run(['-d', 'get-serialno'], device=False)
+            serial = out.decode('utf-8', 'replace').strip()
+            if code or not serial or serial == 'unknown':
+                raise BackupError('Connect exactly ONE USB phone, unlock it and accept Allow USB debugging. If it is still missing, check the cable and manufacturer USB driver. ADB: ' + err.decode('utf-8', 'replace')[:400])
+            self.serial = serial
         code, out, _ = self.shell('getprop ro.product.model')
         model = out.decode('utf-8', 'replace').strip() if not code else 'Android phone'
         _, version, _ = self.shell('getprop ro.build.version.release')
-        return dict(model=model, android=version.decode('utf-8', 'replace').strip(), serial=serial)
+        return dict(model=model, android=version.decode('utf-8', 'replace').strip(), serial=self.serial)
 
     def roots(self):
         roots = [('Internal storage', '/sdcard/')]
@@ -262,34 +379,100 @@ class Engine:
             raise BackupError('Phone returned an unrecognized SHA-256 result')
         return match[1].decode().lower()
 
-    def measure_sizes(self, inventory):
-        # Optional metadata only. Batches avoid an extra PC subprocess per file.
-        sizes = {remote:None for _, _, remote in inventory}
-        batches=[];batch=[];length=0
+    def measure_meta(self, inventory):
+        """Optional size and modification-time metadata for ETA, incremental mode and
+        date preservation. Batches avoid an extra PC subprocess per file."""
+        sizes = {remote: None for _, _, remote in inventory}
+        mtimes = {remote: None for _, _, remote in inventory}
+        batches = []
+        batch = []
+        length = 0
         for _, _, remote in inventory:
-            quoted=shlex.quote(remote)
-            if batch and (len(batch)>=64 or length+len(quoted)>6000):
-                batches.append(batch);batch=[];length=0
-            batch.append(remote);length+=len(quoted)+1
-        if batch:batches.append(batch)
-        failures=0
-        for index,batch in enumerate(batches,1):
-            self.update(detail='Measuring selected file sizes: batch '+str(index)+' of '+str(len(batches)))
+            quoted = shlex.quote(remote)
+            if batch and (len(batch) >= 64 or length + len(quoted) > 6000):
+                batches.append(batch)
+                batch = []
+                length = 0
+            batch.append(remote)
+            length += len(quoted) + 1
+        if batch:
+            batches.append(batch)
+        failures = 0
+        for index, batch in enumerate(batches, 1):
+            self.update(detail='Measuring selected file sizes: batch ' + str(index) + ' of ' + str(len(batches)))
             try:
-                code,out,err=self.shell('stat -c %s -- '+' '.join(shlex.quote(p) for p in batch),timeout=900)
-                lines=out.decode('ascii').splitlines()
-                if code or err.strip() or len(lines)!=len(batch) or any(not re.fullmatch(r'[0-9]+',line) for line in lines):
-                    failures+=1
-                    if code==127 or failures>=5:break
+                code, out, err = self.shell("stat -c '%s %Y' -- " + ' '.join(shlex.quote(p) for p in batch), timeout=900)
+                lines = out.decode('ascii').splitlines()
+                if code or err.strip() or len(lines) != len(batch) or any(not re.fullmatch(r'[0-9]+ [0-9]+', line) for line in lines):
+                    failures += 1
+                    if code == 127 or failures >= 5:
+                        break
                     continue
-                for remote,line in zip(batch,lines):sizes[remote]=int(line)
-            except (Cancelled,DeviceDisconnected):
+                for remote, line in zip(batch, lines):
+                    size, mtime = line.split(' ')
+                    sizes[remote] = int(size)
+                    mtimes[remote] = int(mtime)
+            except (Cancelled, DeviceDisconnected):
                 raise
             except Exception:
                 break
-        unknown=sum(n is None for n in sizes.values())
-        if unknown:self.warn('Could not measure '+str(unknown)+' selected file sizes. Backup can continue; the rough ETA has incomplete byte information.')
-        return sizes
+        unknown = sum(n is None for n in sizes.values())
+        if unknown:
+            self.warn('Could not measure ' + str(unknown) + ' selected file sizes. Backup can continue; the rough ETA, incremental matching and date preservation have incomplete information.')
+        return sizes, mtimes
+
+    def load_previous(self, destination, current_name):
+        """Newest-first map of source path -> verified record from earlier backups in
+        the same destination. Used only when incremental mode is on."""
+        self.previous = {}
+        try:
+            candidates = sorted((p for p in Path(destination).glob('megahy-backup-*') if p.is_dir() and p.name != current_name),
+                                key=lambda p: p.name, reverse=True)
+        except OSError:
+            return
+        used = 0
+        for cand in candidates[:5]:
+            manifest = cand / 'manifest.jsonl'
+            if not manifest.is_file():
+                continue
+            try:
+                with open(manifest, encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            record = json.loads(line)
+                        except ValueError:
+                            continue
+                        if record.get('status') not in ('verified', 'skipped-unchanged'):
+                            continue
+                        source = record.get('source')
+                        if not isinstance(source, str) or source in self.previous:
+                            continue
+                        self.previous[source] = dict(
+                            bytes=record.get('bytes'),
+                            mtime=record.get('source_mtime'),
+                            sha256=record.get('source_sha256_after'),
+                            folder=record.get('available_in') if record.get('status') == 'skipped-unchanged' else cand.name)
+                used += 1
+            except OSError:
+                continue
+        if used:
+            self.update(detail='Incremental mode: loaded ' + str(len(self.previous)) + ' previously verified files from ' + str(used) + ' earlier backup(s).')
+
+    def unchanged(self, remote, size, mtime):
+        """Return the earlier record when this file is provably unchanged, else None."""
+        prev = self.previous.get(remote)
+        if not prev or prev.get('bytes') is None or size is None or prev['bytes'] != size:
+            return None
+        if prev.get('mtime') and mtime and prev['mtime'] == mtime:
+            return prev
+        # Same size but no trustworthy timestamps: prove identity with a hash.
+        if prev.get('sha256'):
+            try:
+                if self.remote_hash(remote) == prev['sha256']:
+                    return prev
+            except BackupError:
+                return None
+        return None
 
     def start(self, destination, options=None):
         options = selection.validate(options)
@@ -301,15 +484,19 @@ class Engine:
             self.resume_check = False
             self.options = options
             self.progress = CopyProgress()
-            self.state = dict(phase='Connecting', detail='Checking USB access...', running=True,
-                              total=0, done=0, verified=0, failed=0, vcf=0, folder='', warnings=[], recent=[], categories={}, miui_backup_files=0, scanned=0, excluded=0, paused=False, pause_requested=False, selection=json.loads(json.dumps(options)))
+            self.previous = {}
+            self.state = dict(phase='Connecting', detail='Checking phone access...', running=True, mode='backup',
+                              total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder='',
+                              warnings=[], recent=[], categories={}, scanned=0, excluded=0,
+                              paused=False, pause_requested=False, selection=json.loads(json.dumps(options)),
+                              adb_setup=self.state.get('adb_setup'))
         threading.Thread(target=self.backup, args=(destination,), daemon=True).start()
         return True
 
     def backup(self, destination):
         folder = None
         records = None
-        summary = dict(version='0.3.1-rc2', started=dt.datetime.now().astimezone().isoformat(),
+        summary = dict(version=VERSION, started=dt.datetime.now().astimezone().isoformat(),
                        scope='Selected readable shared-storage files and selected permitted providers only. NOT a full phone backup.', gaps=GAPS, selection=self.options)
         try:
             info = self.connect()
@@ -319,6 +506,9 @@ class Engine:
             # Separate new folder every time. Existing backups are never overwritten.
             folder = destination / ('megahy-backup-' + dt.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3))
             folder.mkdir()
+            if self.options['incremental'] and self.options['storage'] != 'none':
+                self.update(detail='Loading earlier backups for incremental mode...')
+                self.load_previous(destination, folder.name)
             self.update(folder=str(folder), detail=info['model'] + ' / Android ' + info['android'])
             (folder / 'READ-FIRST.txt').write_text('\n\n'.join(GAPS), encoding='utf-8')
             # Local provider archives never write anything onto the phone.
@@ -372,13 +562,26 @@ class Engine:
                 raise BackupError('No selected provider records were exported. Review whether the category is empty, partial or unavailable. Nothing from shared storage was requested.')
             (folder / 'inventory.json').write_text(json.dumps(inventory, ensure_ascii=True, indent=2), encoding='utf-8')
             summary.update(scanned_files=scanned, selected_files=len(inventory), excluded_files=excluded)
-            self.update(miui_backup_files=sum(1 for _,root,path in inventory if path[len(root):].lower().startswith('miui/backup/allbackup/')))
             sizes = {}
+            mtimes = {}
             if inventory:
                 self.update(phase='Measuring selected file sizes', detail='Preparing byte counts for a rough ETA...')
-                sizes = self.measure_sizes(inventory)
+                sizes, mtimes = self.measure_meta(inventory)
                 (folder / 'source-sizes-reference.json').write_text(json.dumps(sizes, ensure_ascii=True, indent=2), encoding='utf-8')
                 self.progress.begin(sizes)
+                # Free-space precheck against measured selected bytes.
+                known = sum(n for n in sizes.values() if n is not None)
+                if self.previous:
+                    pending = sum(sizes.get(r, 0) or 0 for _, _, r in inventory
+                                  if not (sizes.get(r) is not None and self.previous.get(r)
+                                          and self.previous[r].get('bytes') == sizes.get(r)
+                                          and self.previous[r].get('mtime') and mtimes.get(r)
+                                          and self.previous[r]['mtime'] == mtimes.get(r)))
+                else:
+                    pending = known
+                free = shutil.disk_usage(str(destination)).free
+                if pending and free < pending + 64 * 1024 * 1024:
+                    raise BackupError('Not enough free disk space at the destination: about ' + str(pending // (1024 * 1024)) + ' MiB are needed for this selection but only ' + str(free // (1024 * 1024)) + ' MiB are free. Free space or choose another folder.')
             records = open(folder / 'manifest.jsonl', 'w', encoding='utf-8')
             mapper = NameMapper()
             self.update(phase='Copying and verifying')
@@ -389,13 +592,28 @@ class Engine:
                 try:
                     if self.stop.is_set():
                         raise Cancelled('Stopped by user')
+                    if mtimes.get(remote) is not None:
+                        record['source_mtime'] = mtimes[remote]
+                    # Incremental: skip files already verified unchanged in an earlier backup.
+                    prev = self.unchanged(remote, sizes.get(remote), mtimes.get(remote)) if self.previous else None
+                    if prev:
+                        record.update(status='skipped-unchanged', bytes=sizes.get(remote),
+                                      source_sha256_after=prev.get('sha256'),
+                                      available_in=prev.get('folder'))
+                        with self.lock:
+                            self.state['skipped'] += 1
+                        records.write(json.dumps(record, ensure_ascii=True) + '\n')
+                        records.flush()
+                        self.progress.record(remote, record.get('bytes', 0))
+                        self.update(done=index)
+                        continue
                     rel = mapper.map(label + '/' + remote[len(root):])
                     target = folder / 'files' / rel
                     record['local'] = str(Path('files') / rel)
                     os.makedirs(local_path(target.parent), exist_ok=True)
                     partial = target.with_name(target.name + '.partial')
                     before = self.remote_hash(remote)
-                    code, out, err = self.run(['pull', remote, local_path(partial)], timeout=7200)
+                    code, out, err = self.run(['pull', '-a', remote, local_path(partial)], timeout=7200)
                     if code:
                         error_text = err.decode('utf-8', 'replace')
                         # adb writes the PC file itself, so ENOSPC can arrive as
@@ -409,6 +627,13 @@ class Engine:
                     if before != after or before != pc_hash:
                         raise BackupError('Hash mismatch or source changed during copy. File is not verified.')
                     os.replace(local_path(partial), local_path(target))
+                    # Preserve the phone's modification date on the PC copy.
+                    if mtimes.get(remote):
+                        try:
+                            os.utime(local_path(target), (mtimes[remote], mtimes[remote]))
+                            record['mtime_preserved'] = True
+                        except OSError:
+                            record['mtime_preserved'] = False
                     record.update(status='verified', bytes=os.path.getsize(local_path(target)))
                     with self.lock:
                         self.state['verified'] += 1
@@ -434,10 +659,11 @@ class Engine:
                     if connected:
                         raise BackupError('Phone disconnected. This backup is incomplete. Reconnect and start a new run.')
                 finally:
-                    records.write(json.dumps(record, ensure_ascii=True) + '\n')
-                    records.flush()
-                    self.progress.record(remote, record.get('bytes', 0))
-                    self.update(done=index)
+                    if record.get('status') != 'skipped-unchanged':
+                        records.write(json.dumps(record, ensure_ascii=True) + '\n')
+                        records.flush()
+                        self.progress.record(remote, record.get('bytes', 0))
+                        self.update(done=index)
             # A second inventory spots newly added or removed files. This is still not a snapshot.
             self.update(phase='Checking for storage changes')
             for label, root, scan_root in scan_roots:
@@ -482,21 +708,158 @@ class Engine:
                           'Scanned readable files: ' + str(summary['scanned']),
                           'Excluded by selection: ' + str(summary['excluded']),
                           'Selected files: ' + str(summary['total']), 'Attempted: ' + str(summary['done']),
-                          'Verified: ' + str(summary['verified']), 'Failed: ' + str(summary['failed']),
+                          'Verified: ' + str(summary['verified']),
+                          'Skipped unchanged (kept in an earlier backup folder): ' + str(summary.get('skipped', 0)),
+                          'Failed: ' + str(summary['failed']),
                           'Existing contact-export files found (not completeness-checked): ' + str(summary['vcf']),
-                          'Existing MIUI backup files discovered: ' + str(summary['miui_backup_files']),
                           'AUTOMATIC PROVIDER CATEGORIES (not restore-tested):', json.dumps(summary['categories'], ensure_ascii=True, indent=2), '',
                           'WARNINGS:', *summary['warnings'], '', 'ALWAYS EXCLUDED / NOT GUARANTEED:', *GAPS,
-                          '', 'See manifest.jsonl for per-file paths, hashes and failures. See inventory.json for discovered files.'])
+                          '', 'See manifest.jsonl for per-file paths, hashes, dates and failures. See inventory.json for discovered files.'])
                     (folder / 'REPORT.txt').write_text(text, encoding='utf-8')
                 except Exception as e:
                     self.update(phase='Error, incomplete', detail='Could not write the final report: ' + str(e))
             self.resume_gate.set()
             self.update(running=False, paused=False, pause_requested=False)
 
+    # ----- Restore (copies verified files back to the phone; writes to the phone) -----
+
+    def list_backups(self, destination):
+        """Previous backup folders in a destination, newest first."""
+        destination = Path(destination).expanduser().resolve()
+        result = []
+        if not destination.is_dir():
+            return result
+        for cand in sorted((p for p in destination.glob('megahy-backup-*') if p.is_dir()), key=lambda p: p.name, reverse=True):
+            entry = {'name': cand.name}
+            report = cand / 'report.json'
+            if report.is_file():
+                try:
+                    data = json.loads(report.read_text(encoding='utf-8'))
+                    entry.update(verified=data.get('verified'), failed=data.get('failed'),
+                                 started=data.get('started'), phase=data.get('phase'))
+                except Exception:
+                    pass
+            entry['files_present'] = (cand / 'files').is_dir()
+            result.append(entry)
+        return result[:30]
+
+    def start_restore(self, destination, backup_name, target):
+        with self.lock:
+            if self.state['running']:
+                return False
+            destination = Path(destination).expanduser().resolve()
+            if not re.fullmatch(r'megahy-backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}', backup_name or ''):
+                raise ValueError('Choose a backup folder made by this app')
+            folder = destination / backup_name
+            if not folder.is_dir() or folder.parent != destination:
+                raise ValueError('That backup folder was not found in the destination')
+            _, _, target = selection.folder_scope(target)
+            self.stop.clear()
+            self.resume_gate.set()
+            self.resume_check = False
+            self.progress = CopyProgress()
+            self.state = dict(phase='Connecting', detail='Checking phone access...', running=True, mode='restore',
+                              total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder=str(folder),
+                              warnings=[], recent=[], categories={}, scanned=0, excluded=0,
+                              paused=False, pause_requested=False, selection=selection.defaults(),
+                              adb_setup=self.state.get('adb_setup'))
+        threading.Thread(target=self.restore, args=(folder, target), daemon=True).start()
+        return True
+
+    def restore(self, folder, target):
+        records = None
+        try:
+            info = self.connect()
+            self.update(detail=info['model'] + ' / Android ' + info['android'])
+            manifest = folder / 'manifest.jsonl'
+            if not manifest.is_file():
+                raise BackupError('This backup folder has no manifest.jsonl to restore from.')
+            wanted = []
+            with open(manifest, encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if record.get('status') == 'verified' and record.get('local') and record.get('local_sha256'):
+                        local_file = folder / record['local']
+                        if local_file.is_file():
+                            wanted.append((record, local_file))
+            if not wanted:
+                raise BackupError('No verified files from this backup are still present on the PC. Nothing to restore.')
+            stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+            target_root = target.rstrip('/') + '/megahy-backup-restore-' + stamp
+            code, _, err = self.shell('mkdir -p ' + shlex.quote(target_root))
+            if code:
+                raise BackupError('Could not create the restore folder on the phone: ' + err.decode('utf-8', 'replace')[:400])
+            restore_dir = folder / 'restores' / ('restore-' + stamp)
+            restore_dir.mkdir(parents=True, exist_ok=True)
+            records = open(restore_dir / 'restore-manifest.jsonl', 'w', encoding='utf-8')
+            self.update(phase='Restoring files to the phone', total=len(wanted))
+            self.warn('Restore copies files into ' + target_root + ' on the phone. It does not put contacts, messages or app data back into their apps.')
+            for index, (record, local_file) in enumerate(wanted, 1):
+                self.update(detail=str(record['local']), done=index-1)
+                out_record = dict(source=record.get('source'), local=record.get('local'), status='failed')
+                try:
+                    if self.stop.is_set():
+                        raise Cancelled('Stopped by user')
+                    # Rebuild the phone-relative path from the original source path.
+                    dest = target_root + '/' + '/'.join(PurePosixPath(record['local']).parts[2:])
+                    parent = str(PurePosixPath(dest).parent)
+                    code, _, err = self.shell('mkdir -p ' + shlex.quote(parent))
+                    if code:
+                        raise BackupError('Could not create folder on the phone: ' + err.decode('utf-8', 'replace')[:300])
+                    code, out, err = self.run(['push', local_path(local_file), dest], timeout=7200)
+                    if code:
+                        raise BackupError('Push failed: ' + err.decode('utf-8', 'replace')[:600])
+                    phone_hash = self.remote_hash(dest)
+                    out_record['phone_sha256'] = phone_hash
+                    if phone_hash == record['local_sha256']:
+                        out_record['status'] = 'restored-verified'
+                        with self.lock:
+                            self.state['verified'] += 1
+                    else:
+                        out_record['status'] = 'restored-unverified'
+                        out_record['error'] = 'Hash on the phone does not match the backed-up file.'
+                        with self.lock:
+                            self.state['failed'] += 1
+                except Cancelled:
+                    out_record['error'] = 'Run stopped before this file was restored'
+                    with self.lock:
+                        self.state['failed'] += 1
+                    raise
+                except Exception as e:
+                    out_record['error'] = str(e)
+                    with self.lock:
+                        self.state['failed'] += 1
+                    if isinstance(e, DeviceDisconnected):
+                        raise
+                finally:
+                    records.write(json.dumps(out_record, ensure_ascii=True) + '\n')
+                    records.flush()
+                    self.progress.record(record.get('source'), record.get('bytes', 0))
+                    self.update(done=index)
+            self.update(phase='Restore finished', detail='Files were copied to ' + target_root + '. Check them on the phone before relying on them.')
+        except Cancelled:
+            self.update(phase='Stopped, incomplete', detail='The restore stopped. Files already pushed remain on the phone.')
+        except Exception as e:
+            self.update(phase='Error, incomplete', detail=str(e))
+        finally:
+            if records:
+                try:
+                    records.close()
+                except Exception:
+                    pass
+            self.resume_gate.set()
+            self.update(running=False, paused=False, pause_requested=False)
+
 
 def serve(engine, port=0, open_browser=True):
     token = secrets.token_urlsafe(32)
+
+    def persisted():
+        return app_settings.load(BASE)
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -521,7 +884,27 @@ def serve(engine, port=0, open_browser=True):
             if self.path == '/':
                 self.reply(200, (BASE / 'ui.html').read_bytes(), 'text/html; charset=utf-8')
             elif self.path == '/api/state' and self.authorized():
-                self.reply(200, dict(engine.snapshot(), default_destination=str(Path.home() / 'megahy-backup')))
+                saved = persisted()
+                last_auto = None
+                try:
+                    auto_file = BASE / 'last-auto-run.json'
+                    if auto_file.is_file():
+                        last_auto = json.loads(auto_file.read_text(encoding='utf-8'))
+                except Exception:
+                    last_auto = None
+                try:
+                    scheduled = scheduler.status()
+                except Exception:
+                    scheduled = None
+                self.reply(200, dict(engine.snapshot(),
+                                     default_destination=saved['destination'] or str(Path.home() / 'megahy-backup'),
+                                     saved_selection=saved['selection'],
+                                     theme=saved['theme'], language=saved['language'],
+                                     profiles=sorted(saved['profiles'].keys()),
+                                     adb_present=bool(adbtools.find_adb(BASE) or engine.adb),
+                                     os_name=os.name,
+                                     scheduled=scheduled, schedule=saved.get('schedule'),
+                                     last_auto=last_auto, version=VERSION))
             else:
                 self.reply(403, {'error': 'Not allowed'})
 
@@ -530,7 +913,7 @@ def serve(engine, port=0, open_browser=True):
                 return self.reply(403, {'error': 'Not allowed'})
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if length < 0 or length > 8192:
+                if length < 0 or length > 65536:
                     raise ValueError('Invalid request size')
                 data = json.loads(self.rfile.read(length) or b'{}')
                 if self.path == '/api/start':
@@ -540,20 +923,100 @@ def serve(engine, port=0, open_browser=True):
                     if not isinstance(destination, str) or not destination.strip():
                         raise ValueError('Choose a backup folder')
                     options = selection.validate(data.get('selection'))
-                    if not engine.start(destination, options):
+                    if not engine.start(destination.strip(), options):
                         return self.reply(409, {'error': 'A backup is already running'})
+                    saved = persisted()
+                    saved['destination'] = destination.strip()
+                    saved['selection'] = options
+                    app_settings.save(BASE, saved)
                 elif self.path == '/api/pause':
                     engine.request_pause()
                 elif self.path == '/api/resume':
                     engine.resume()
                 elif self.path == '/api/stop':
                     engine.request_stop()
+                elif self.path == '/api/browse-folder':
+                    if engine.snapshot()['running']:
+                        return self.reply(409, {'error': 'Finish or stop the current run before changing the folder'})
+                    path = pick_folder()
+                    self.reply(200, {'ok': True, 'path': path, 'cancelled': path == ''})
+                    return
                 elif self.path == '/api/open':
                     folder = engine.snapshot()['folder']
                     if os.name == 'nt' and folder and Path(folder).is_dir():
                         os.startfile(folder)
                     else:
                         raise ValueError('Open this folder manually: ' + folder)
+                elif self.path == '/api/preferences':
+                    saved = persisted()
+                    if data.get('theme') in ('light', 'dark'):
+                        saved['theme'] = data['theme']
+                    if data.get('language') in ('en', 'ar'):
+                        saved['language'] = data['language']
+                    app_settings.save(BASE, saved)
+                elif self.path == '/api/profiles':
+                    saved = persisted()
+                    action = data.get('action')
+                    name = data.get('name')
+                    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 60:
+                        raise ValueError('Profile name must be 1-60 characters')
+                    name = name.strip()
+                    if action == 'save':
+                        destination = data.get('destination')
+                        if not isinstance(destination, str) or not destination.strip():
+                            raise ValueError('Choose a backup folder before saving a profile')
+                        saved['profiles'][name] = dict(destination=destination.strip(),
+                                                       selection=selection.validate(data.get('selection')))
+                        app_settings.save(BASE, saved)
+                    elif action == 'delete':
+                        saved['profiles'].pop(name, None)
+                        app_settings.save(BASE, saved)
+                    else:
+                        raise ValueError('Unknown profile action')
+                    self.reply(200, {'ok': True, 'profiles': sorted(saved['profiles'].keys())})
+                    return
+                elif self.path == '/api/profile-load':
+                    saved = persisted()
+                    profile = saved['profiles'].get(data.get('name'))
+                    if not profile:
+                        raise ValueError('Profile not found')
+                    self.reply(200, {'ok': True, 'destination': profile['destination'], 'selection': profile['selection']})
+                    return
+                elif self.path == '/api/setup-adb':
+                    engine.setup_adb_async()
+                elif self.path == '/api/wifi-pair':
+                    engine.pair_wifi(data.get('host'), data.get('port'), data.get('code'))
+                elif self.path == '/api/wifi-connect':
+                    serial = engine.connect_wifi(data.get('host'), data.get('port'))
+                    self.reply(200, {'ok': True, 'serial': serial})
+                    return
+                elif self.path == '/api/restore-list':
+                    destination = data.get('destination')
+                    if not isinstance(destination, str) or not destination.strip():
+                        raise ValueError('Choose the destination folder that holds your backups')
+                    self.reply(200, {'ok': True, 'backups': engine.list_backups(destination.strip())})
+                    return
+                elif self.path == '/api/restore':
+                    destination = data.get('destination')
+                    if not isinstance(destination, str) or not destination.strip():
+                        raise ValueError('Choose the destination folder that holds your backups')
+                    target = data.get('target') or '/sdcard/'
+                    if not engine.start_restore(destination.strip(), data.get('backup'), target):
+                        return self.reply(409, {'error': 'Another run is already active'})
+                elif self.path == '/api/schedule':
+                    info = scheduler.install(BASE, data.get('frequency'), data.get('time'))
+                    saved = persisted()
+                    saved['schedule'] = {'frequency': data.get('frequency'), 'time': data.get('time')}
+                    app_settings.save(BASE, saved)
+                    self.reply(200, {'ok': True, 'scheduled': True, 'task': info})
+                    return
+                elif self.path == '/api/schedule-delete':
+                    scheduler.remove()
+                    saved = persisted()
+                    saved['schedule'] = {}
+                    app_settings.save(BASE, saved)
+                    self.reply(200, {'ok': True, 'scheduled': False})
+                    return
                 else:
                     return self.reply(404, {'error': 'Unknown action'})
                 self.reply(200, {'ok': True})
@@ -562,17 +1025,46 @@ def serve(engine, port=0, open_browser=True):
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
     url = 'http://127.0.0.1:' + str(server.server_port) + '/#' + token
-    print('megahy-backup preview is running locally. Keep this window open.\n' + url, flush=True)
+    print('megahy-backup is running locally. Keep this window open.\n' + url, flush=True)
     if open_browser:
         webbrowser.open(url)
     return server, url
+
+
+def run_auto():
+    """Headless scheduled backup using the last saved settings. Exit 0 on the
+    normal completed phase, 1 otherwise."""
+    saved = app_settings.load(BASE)
+    destination = saved['destination'] or str(Path.home() / 'megahy-backup')
+    options = selection.validate(saved['selection'])
+    engine = Engine()
+    engine.start(destination, options)
+    while True:
+        snap = engine.snapshot()
+        if not snap['running']:
+            break
+        print(snap['phase'] + ': ' + snap.get('detail', ''), flush=True)
+        time.sleep(2)
+    snap = engine.snapshot()
+    record = {'finished': dt.datetime.now().astimezone().isoformat(), 'phase': snap['phase'],
+              'verified': snap['verified'], 'failed': snap['failed'], 'skipped': snap.get('skipped', 0),
+              'folder': snap['folder']}
+    try:
+        (BASE / 'last-auto-run.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
+    except OSError:
+        pass
+    print('Automatic backup ended: ' + snap['phase'], flush=True)
+    return 0 if snap['phase'] == 'Finished with gaps' else 1
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--auto', action='store_true', help='Run one unattended backup with the saved settings (used by the scheduler).')
     args = parser.parse_args()
+    if args.auto:
+        sys.exit(run_auto())
     server, _ = serve(Engine(), args.port, not args.no_browser)
     try:
         server.serve_forever()

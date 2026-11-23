@@ -1,10 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-rem Copyright (c) 2026 CableVault contributors and Marwan Megahy
+rem Copyright (c) 2026 Marwan Megahy
 rem SPDX-License-Identifier: GPL-3.0-or-later
 rem Licensed under the GNU General Public License version 3 or later. See LICENSE.txt.
-title megahy-backup - Android USB backup 0.3.1-rc2
+title megahy-backup - Android backup 0.4.0-rc3
 if not exist "%~dp0runtime\python.exe" (
   echo The bundled runtime is missing. Extract the whole ZIP first.
   pause

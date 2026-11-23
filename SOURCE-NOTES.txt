@@ -1,0 +1,15 @@
+megahy-backup 0.4.0-rc3 source
+==============================
+This archive holds the Python, HTML and launcher source for the rc3 Windows
+release (megahy-backup-0.4.0-rc3-windows-x64.zip). It is the same set of files
+as in that ZIP, without the bundled Python runtime.
+
+Build / run notes
+- The app uses only the Python standard library (Python 3.10 or newer).
+- Run from source:  python megahy_backup.py
+- The Windows ZIP adds a "runtime" folder: the unmodified embeddable Windows
+  x64 Python 3.14 distribution from python.org (its own LICENSE.txt is in that
+  folder). START-megahy-backup.cmd starts the app with that runtime.
+- To rebuild the ZIP: copy this folder to "megahy-backup", add the Python
+  embeddable runtime as "runtime", and zip the "megahy-backup" folder.
+- Android Platform-Tools (adb) is not bundled; the app downloads it from Google.

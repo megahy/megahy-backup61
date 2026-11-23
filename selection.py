@@ -1,9 +1,8 @@
-# Copyright (c) 2026 CableVault contributors and Marwan Megahy
+# Copyright (c) 2026 Marwan Megahy
 # SPDX-License-Identifier: GPL-3.0-or-later
 # This program is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License version 3 or (at your option) any later
-# version. See LICENSE.txt. Code inherited from the CableVault preview remains under
-# the MIT license; see NOTICE.txt.
+# version. See LICENSE.txt.
 """Validated, explicit backup selections. Filename filters never prove completeness."""
 from pathlib import PurePosixPath
 import re
@@ -16,7 +15,7 @@ CACHE_NAMES = frozenset(('cache', 'caches', '.cache', 'code_cache', 'thumbnails'
 
 
 def defaults():
-    return dict(storage='all', providers=list(PROVIDERS), folder='', include_hidden=True, include_cache=True)
+    return dict(storage='all', providers=list(PROVIDERS), folder='', include_hidden=True, include_cache=True, incremental=True)
 
 
 def folder_scope(value):
@@ -50,6 +49,8 @@ def validate(value=None):
         raise ValueError('Choose supported provider categories without duplicates')
     if type(result['include_hidden']) is not bool or type(result['include_cache']) is not bool:
         raise ValueError('Hidden/cache selections must be true or false')
+    if type(result['incremental']) is not bool:
+        raise ValueError('Incremental selection must be true or false')
     if not isinstance(result['folder'], str):
         raise ValueError('Folder path must be text')
     if result['storage'] == 'folder':

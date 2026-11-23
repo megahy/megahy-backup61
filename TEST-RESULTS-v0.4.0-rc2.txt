@@ -1,0 +1,36 @@
+megahy-backup 0.4.0-rc2
+Test report, 23 November 2026
+
+Scope of this report: the rc2 change only (Browse button for the backup
+destination field). rc1's simulation results still stand for everything else;
+see TESTING.md. These counts are software test results, NOT a phone
+compatibility/success rate.
+
+PASS: 27 automated checks (Python 3.10, Linux, standard library only):
+- All app modules compile.
+- pick_folder(): correct PowerShell FolderBrowserDialog invocation
+  (powershell -NoProfile -STA), Unicode path decoding, cancel returns an
+  empty path, picker failure and timeout raise the safe fallback error,
+  control characters in a returned path are rejected, non-Windows hosts get
+  the fallback error.
+- /api/browse-folder endpoint on the real local server: requires the app
+  token (403 without), requires the loopback Host header (403 otherwise),
+  returns the chosen path, reports cancel, turns picker failure into a 400
+  with the fallback message, refuses to run while a backup is active (409),
+  unknown actions still 404.
+- Regression: state endpoint auth, UI served, start still requires the scope
+  acknowledgement, NameMapper path safety, settings defaults, selection
+  validation, scheduler time validation, version consistency.
+- UI static checks: Browse button markup, Arabic label, button disabled
+  during runs, click handler posts to the endpoint.
+
+PASS: live browser check of the real ui.html (stubbed backend):
+- Light and dark themes render the button beside the field.
+- Arabic RTL renders the button correctly ("استعراض...").
+- Clicking Browse fills the destination field with the picker's path.
+
+NOT TESTED (unchanged from rc1, plus):
+- The actual Windows FolderBrowserDialog: no Windows machine was available,
+  so the dialog invocation is verified by argument inspection only. The
+  manual path field remains as the fallback.
+- A real phone, real ADB, real USB/Wi-Fi, real Windows.
