@@ -1,6 +1,6 @@
 # megahy-backup
 
-*0.4.0-rc4 | Release candidate. New features tested in simulation only, not yet on a real phone.*
+*0.4.0-rc6 | Release candidate. New features tested in simulation only, not yet on a real phone.*
 Selective Android backup for Windows PCs, by Marwan Megahy. Built with help from an AI assistant and tested by the author.
 
 Copy readable photos, videos and other shared-storage files from any Android phone to your own PC over USB or Wi-Fi. Each verified file must have matching SHA-256 hashes on the phone before and after copying and on the PC. Contacts, SMS, MMS and call logs are optional best-effort exports, only when Android already permits access. Works the same on every phone brand; no brand-specific setup.
@@ -54,8 +54,19 @@ This is a selected readable-file backup, not a full phone clone. Private app dat
 
 ## Testing status
 
-0.4.0-rc4 passed 40 automated simulation checks (synthetic ADB device, Linux host): full backup, hash verification, stop-then-continue of the same folder, mid-file continue of a large file after a disconnect, corrupted-partial re-verification, whole-file fallback when ranged reads are unavailable, continuing an rc3-made interrupted folder, refusal to continue folders without selection proof, and re-copy of a verified file whose PC copy was deleted. The rc3 Browse picker fix is still verified by code inspection only and needs one real Windows PC check; the keep-awake request (SetThreadExecutionState) is likewise unverified on real Windows. Earlier candidates: rc3 passed 23 checks, rc2 passed 27, rc1 passed 39. **None of the features ran on a real phone or Windows PC yet.** See TESTING.md.
+0.4.0-rc6 passed 40 automated simulation checks (synthetic ADB device, Linux host): full backup, hash verification, stop-then-continue of the same folder, mid-file continue of a large file after a disconnect, corrupted-partial re-verification, whole-file fallback when ranged reads are unavailable, continuing an rc3-made interrupted folder, refusal to continue folders without selection proof, and re-copy of a verified file whose PC copy was deleted. The rc3 Browse picker fix is still verified by code inspection only and needs one real Windows PC check; the keep-awake request (SetThreadExecutionState) is likewise unverified on real Windows. Earlier candidates: rc3 passed 23 checks, rc2 passed 27, rc1 passed 39. **None of the features ran on a real phone or Windows PC yet.** See TESTING.md.
 
 ## License
 
 GPLv3 or later. Copyright (c) 2026 Marwan Megahy. See LICENSE.txt, NOTICE.txt and THIRD-PARTY-NOTICES.md. Source: https://github.com/megahy/megahy-backup61
+
+RC5 FIX: rc4 had a JavaScript syntax error that stopped every UI button. rc6 fixes it and adds headless browser interaction tests (20 passed), plus 40 engine simulations rerun. Close the old app console and browser tab, extract rc6 into a NEW app folder, then launch its START-megahy-backup.cmd. Keep your backup destination unchanged. Do not delete the old backup folders.
+
+
+megahy-backup 0.4.0-rc6, 23 November 2026
+
+Fix: discover interrupted backups at launch and when the parent folder changes through typing, Browse or profile load. Continue requires scope acknowledgement and is invalidated immediately when the destination changes. Discovery does not start a backup or write its files. Backup engine/format unchanged from rc5.
+
+Checks on Linux with synthetic ADB: 20 existing browser checks, 19 restart/discovery checks including the delivered rc5 failure and a report-only rc3 fixture, and 40 engine checks passed. No real Windows runtime, native dialog, keep-awake, USB or physical phone tested.
+
+Use: close old console and tab, extract rc6 to a new app folder, run START-megahy-backup.cmd. Choose the PARENT containing the dated interrupted folder. Tick the scope box and press Continue. Do not start a new backup merely to enable Continue. If no interrupted offer appears, inspect the original folder/report instead. rc3 requires manifest.jsonl, inventory.json, and report.json with saved selection and an incomplete phase. Detection checks the ten newest dated folders.

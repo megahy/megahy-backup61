@@ -3,7 +3,7 @@
 # This program is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License version 3 or (at your option) any later
 # version. See LICENSE.txt.
-"""megahy-backup 0.4.0-rc4. Standard-library-only Android backup for Windows PCs."""
+"""megahy-backup 0.4.0-rc6. Standard-library-only Android backup for Windows PCs."""
 from __future__ import annotations
 import argparse
 import datetime as dt
@@ -34,7 +34,7 @@ from eta import CopyProgress
 # Keep cancellation types identical when launched as a script.
 sys.modules.setdefault('megahy_backup', sys.modules[__name__])
 BASE = Path(__file__).resolve().parent
-VERSION = '0.4.0-rc4'
+VERSION = '0.4.0-rc6'
 # Ranged chunked copy (mid-file resume): large files copy in CHUNK_SIZE reads
 # through `adb exec-out dd`, so a stop, disconnect or crash keeps the verified
 # chunks. The whole-file triple hash check still gates every verified file.

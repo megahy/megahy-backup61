@@ -1,0 +1,7 @@
+megahy-backup 0.4.0-rc6, 23 November 2026
+
+Fix: discover interrupted backups at launch and when the parent folder changes through typing, Browse or profile load. Continue requires scope acknowledgement and is invalidated immediately when the destination changes. Discovery does not start a backup or write its files. Backup engine/format unchanged from rc5.
+
+Checks on Linux with synthetic ADB: 20 existing browser checks, 19 restart/discovery checks including the delivered rc5 failure and a report-only rc3 fixture, and 40 engine checks passed. No real Windows runtime, native dialog, keep-awake, USB or physical phone tested.
+
+Use: close old console and tab, extract rc6 to a new app folder, run START-megahy-backup.cmd. Choose the PARENT containing the dated interrupted folder. Tick the scope box and press Continue. Do not start a new backup merely to enable Continue. If no interrupted offer appears, inspect the original folder/report instead. rc3 requires manifest.jsonl, inventory.json, and report.json with saved selection and an incomplete phase. Detection checks the ten newest dated folders.

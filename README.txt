@@ -1,4 +1,4 @@
-megahy-backup 0.4.0-rc4
+megahy-backup 0.4.0-rc6
 RELEASE CANDIDATE. New features are simulation-tested only.
 Start with README.md for supported PCs, rights and current test status.
 
@@ -79,7 +79,7 @@ START, PAUSE, RESUME, STOP
 6. Stop ends the current session, including while paused. Already verified
    files stay verified. In-flight files are not called verified.
 
-CONTINUING AN INTERRUPTED BACKUP (NEW IN 0.4.0-rc4)
+CONTINUING AN INTERRUPTED BACKUP (NEW IN 0.4.0-rc6)
 - After Stop, a disconnect, an error, a crash or PC sleep, the same backup can
   continue instead of starting over. Start with the same destination: the app
   finds the newest interrupted folder and offers to continue it or start new.
@@ -162,7 +162,7 @@ source-sizes-reference.json (optional measured sizes for the ETA, not a snapshot
   before a storage file is marked verified. Provider exports do not have this
   source-versus-PC checksum/completeness proof.
 
-NEW IN 0.4.0-rc4
+NEW IN 0.4.0-rc6
 - Continue an interrupted backup: Stop, disconnect, error, crash or PC sleep
   no longer force a new folder. Verified files stay trusted; the rest is
   copied and verified fresh. See CONTINUING AN INTERRUPTED BACKUP above.
@@ -202,7 +202,7 @@ filenames are not encrypted; protect your PC disk. Disable USB debugging when
 finished. Keep enough disk space; a recognized full-disk ADB error aborts the run.
 
 TESTING
-0.4.0-rc4: 40 automated checks passed on Linux with a synthetic ADB device,
+0.4.0-rc6: 40 automated checks passed on Linux with a synthetic ADB device,
 covering the continue/resume and keep-awake changes (see TESTING.md). The
 keep-awake request and the rc3 Browse picker fix are verified by code
 inspection only and await a real Windows PC. rc3 had 23 checks; rc2 had 27;
@@ -223,3 +223,14 @@ https://developer.android.com/reference/android/provider/Telephony.Mms.Part
 https://developer.android.com/reference/android/provider/CallLog.Calls
 https://www.python.org/downloads/release/python-31410/
 
+
+RC5 FIX: rc4 had a JavaScript syntax error that stopped every UI button. rc6 fixes it and adds headless browser interaction tests (20 passed), plus 40 engine simulations rerun. Close the old app console and browser tab, extract rc6 into a NEW app folder, then launch its START-megahy-backup.cmd. Keep your backup destination unchanged. Do not delete the old backup folders.
+
+
+megahy-backup 0.4.0-rc6, 23 November 2026
+
+Fix: discover interrupted backups at launch and when the parent folder changes through typing, Browse or profile load. Continue requires scope acknowledgement and is invalidated immediately when the destination changes. Discovery does not start a backup or write its files. Backup engine/format unchanged from rc5.
+
+Checks on Linux with synthetic ADB: 20 existing browser checks, 19 restart/discovery checks including the delivered rc5 failure and a report-only rc3 fixture, and 40 engine checks passed. No real Windows runtime, native dialog, keep-awake, USB or physical phone tested.
+
+Use: close old console and tab, extract rc6 to a new app folder, run START-megahy-backup.cmd. Choose the PARENT containing the dated interrupted folder. Tick the scope box and press Continue. Do not start a new backup merely to enable Continue. If no interrupted offer appears, inspect the original folder/report instead. rc3 requires manifest.jsonl, inventory.json, and report.json with saved selection and an incomplete phase. Detection checks the ten newest dated folders.

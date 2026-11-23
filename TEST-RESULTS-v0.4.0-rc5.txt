@@ -1,0 +1,67 @@
+PASS | full run finishes as Finished with gaps | Finished with gaps
+PASS | all 5 files hash-verified, zero failures | 5/0
+PASS | PC copies byte-identical to phone
+PASS | big file verified via chunked path (no .progress.json left)
+PASS | big file used ranged reads (3 chunks) | 3
+PASS | keep-awake is a no-op off Windows (no crash)
+PASS | finished folder is NOT resumable
+PASS | run-state.json holds selection and session 1
+PASS | stop ends run as Stopped, incomplete | Stopped, incomplete
+PASS | stopped run offers a resumable folder | megahy-backup-20261123-161802-a15dc1
+PASS | find_resumable finds the stopped folder with counts | (2, 5)
+PASS | continued run finishes | Finished with gaps
+PASS | continued run reuses the same folder
+PASS | continued run keeps the ORIGINAL selection | all
+PASS | all 5 verified after continue, zero failures | 5/0
+PASS | continued folder byte-identical to phone
+PASS | report marks resumed session 2 | (True, 2)
+PASS | manifest records a session marker
+PASS | REPORT.txt explains the continued backup
+PASS | safe-to-reset notice still present
+PASS | chunk failure ends the run incomplete | Error, incomplete
+PASS | partial file and sidecar kept after disconnect | ['/tmp/rc5work/dest3/megahy-backup-20261123-161808-10e3cb/files/Internal storage/zbig.bin.partial']
+PASS | partial holds exactly 2 chunks | 16777216
+PASS | mid-file continue finishes | Finished with gaps
+PASS | continue reads only the missing chunk (skip=2, count 1 read) | [{'if': '/sdcard/zbig.bin', 'bs': '8388608', 'skip': '2'}]
+PASS | resumed big file byte-identical and verified
+PASS | corrupted partial re-hashed and re-copied from byte 0 (skip=0) | [{'if': '/sdcard/zbig.bin', 'bs': '8388608', 'skip': '0'}]
+PASS | corruption run still finishes fully verified | ('Finished with gaps', 5)
+PASS | re-copied file byte-identical
+PASS | fallback run finishes fully verified via adb pull | ('Finished with gaps', 5)
+PASS | fallback warning names the whole-file behavior | 2
+PASS | fallback copies byte-identical
+PASS | rc3-style stopped folder is resumable (selection from report.json) | (2, 5)
+PASS | rc3 folder continues to completion | ('Finished with gaps', 5)
+PASS | rc3-continued folder byte-identical
+PASS | crash-killed folder without selection proof is NOT resumable
+PASS | resume of unprovable folder refused
+PASS | deleted verified PC copy is re-copied, finishing verified | ('Finished with gaps', 5)
+PASS | version 0.4.0-rc5 consistent across app and docs
+PASS | no rc3 label left in shipped files
+
+TOTAL: 40 of 40 checks passed
+
+PASS | delivered rc4 reproduces JavaScript parse error in Chromium
+PASS | rc4 Browse click sends no API request and state never loads
+PASS | rc4 Start remains disabled
+PASS | rc5 initializes without JavaScript errors
+PASS | scope acknowledgement gates Start
+PASS | Browse click reaches authenticated local API and updates folder
+PASS | cancelled picker preserves destination
+PASS | picker error displayed with manual-path fallback
+PASS | Arabic language table runs and sets RTL
+PASS | English language switch runs
+PASS | theme handler runs
+PASS | Start click starts real engine through API using synthetic ADB
+PASS | Stop produces interrupted backup and enables Continue
+PASS | Start finds interrupted folder and shows Continue/New choice
+PASS | Continue offer completes 5 simulated files with zero failures
+PASS | Continue reuses same folder
+PASS | continued report records session 2
+PASS | status-card Continue button completes interrupted backup
+PASS | reload preserves API token in session storage
+PASS | all fixed UI interactions finish without page errors
+TOTAL: 20 browser checks passed
+
+JavaScript: all inline scripts passed node --check; all Python modules passed py_compile.
+Simulation only on Linux. Native Windows picker, runtime, keep-awake and real-phone behavior unverified.

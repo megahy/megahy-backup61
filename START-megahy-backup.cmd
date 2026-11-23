@@ -4,7 +4,7 @@ cd /d "%~dp0"
 rem Copyright (c) 2026 Marwan Megahy
 rem SPDX-License-Identifier: GPL-3.0-or-later
 rem Licensed under the GNU General Public License version 3 or later. See LICENSE.txt.
-title megahy-backup - Android backup 0.4.0-rc4
+title megahy-backup - Android backup 0.4.0-rc6
 if not exist "%~dp0runtime\python.exe" (
   echo The bundled runtime is missing. Extract the whole ZIP first.
   pause

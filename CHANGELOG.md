@@ -1,3 +1,10 @@
+# 0.4.0-rc6 (2026-11-23)
+
+- Fix an extra comma in the Arabic interface text table that prevented all JavaScript from loading in rc4. Browse, Start and Continue handlers now load again.
+- Add reproducible headless Chromium click tests and JavaScript syntax checks. Prior rc4 engine tests did not test interface script parsing.
+- No backup format or engine behavior changes. Existing interrupted folders are kept.
+- Still simulation-only, not tested on real Windows or a phone.
+
 # Changes
 
 ## 0.4.0-rc4, 2026-11-23, release candidate
