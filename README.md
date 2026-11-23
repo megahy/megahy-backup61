@@ -1,6 +1,6 @@
 # megahy-backup
 
-*0.4.0-rc3 | Release candidate. New features tested in simulation only, not yet on a real phone.*
+*0.4.0-rc4 | Release candidate. New features tested in simulation only, not yet on a real phone.*
 Selective Android backup for Windows PCs, by Marwan Megahy. Built with help from an AI assistant and tested by the author.
 
 Copy readable photos, videos and other shared-storage files from any Android phone to your own PC over USB or Wi-Fi. Each verified file must have matching SHA-256 hashes on the phone before and after copying and on the PC. Contacts, SMS, MMS and call logs are optional best-effort exports, only when Android already permits access. Works the same on every phone brand; no brand-specific setup.
@@ -32,6 +32,9 @@ Full instructions and report formats are in [README.txt](README.txt).
 
 - All readable files, photos/videos by extension, one phone folder, or selected provider categories.
 - **Incremental backup:** unchanged files verified in an earlier backup are skipped (size + date, or hash proof).
+- **Continue an interrupted backup:** after Stop, a disconnect, an error, a crash or PC sleep, continue the same backup folder instead of starting over. Files already hash-verified are trusted as-is; everything else is copied and verified fresh.
+- **Mid-file resume:** large files (4 MiB+) copy in 8 MiB ranged reads, so a stop inside a file keeps its verified chunks. The full SHA-256 check on phone and PC still gates every verified file.
+- **Stays awake while copying:** the app asks Windows not to sleep during a run. Closing the lid, low battery or choosing Sleep yourself can still interrupt it; continue the backup afterwards.
 - **One-click ADB setup:** downloads Google's Platform-Tools and checks the archive before installing.
 - **Original dates kept:** copies carry the phone's modification time.
 - **Wi-Fi backup:** pair and connect over wireless debugging (Android 11+).
@@ -51,7 +54,7 @@ This is a selected readable-file backup, not a full phone clone. Private app dat
 
 ## Testing status
 
-0.4.0-rc3 passed 23 automated simulation checks (synthetic ADB device, Linux host): full backup, hash verification, incremental skip/re-copy rules, date preservation, Wi-Fi pair/connect flow, restore with hash re-verification, provider exports with empty providers, headless --auto mode and the local API. The rc3 Browse picker fix (folder window opening in front of the browser) is verified by code inspection only and still needs one real Windows PC check. Earlier candidates: rc1 passed 39 checks, rc2 passed 27. **None of the features ran on a real phone or Windows PC yet.** See TESTING.md.
+0.4.0-rc4 passed 40 automated simulation checks (synthetic ADB device, Linux host): full backup, hash verification, stop-then-continue of the same folder, mid-file continue of a large file after a disconnect, corrupted-partial re-verification, whole-file fallback when ranged reads are unavailable, continuing an rc3-made interrupted folder, refusal to continue folders without selection proof, and re-copy of a verified file whose PC copy was deleted. The rc3 Browse picker fix is still verified by code inspection only and needs one real Windows PC check; the keep-awake request (SetThreadExecutionState) is likewise unverified on real Windows. Earlier candidates: rc3 passed 23 checks, rc2 passed 27, rc1 passed 39. **None of the features ran on a real phone or Windows PC yet.** See TESTING.md.
 
 ## License
 

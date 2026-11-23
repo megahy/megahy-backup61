@@ -212,7 +212,7 @@ def mms(engine,folder):
 
 
 def export_all(engine,backup_folder,selected=None):
-    root=Path(backup_folder)/'automatic-exports';root.mkdir()
+    root=Path(backup_folder)/'automatic-exports';root.mkdir(exist_ok=True)  # exist_ok: a continued run re-exports into the same folder
     from selection import PROVIDERS
     selected = set(PROVIDERS if selected is None else selected)
     results={name:({'status':'pending','note':'Selected; not attempted yet.'} if name in selected else {'status':'not selected','note':'Not requested in this run; no provider query attempted.'}) for name in PROVIDERS}

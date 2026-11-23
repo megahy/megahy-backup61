@@ -1,5 +1,33 @@
 # Changes
 
+## 0.4.0-rc4, 2026-11-23, release candidate
+Requested by the owner after his first long run stopped when Windows slept and
+the phone disconnected: he wants to stop whenever and continue the same backup
+where it left off, not start over.
+1. Continue an interrupted backup. Stop, disconnect, error, crash or PC sleep
+   no longer force a new dated folder. The app finds the newest interrupted
+   folder in the destination and offers to continue it (also from the status
+   card after a stopped/failed run). Files already hash-verified in an earlier
+   session are trusted as-is; pending and failed files are copied and verified
+   fresh. A verified PC copy that was deleted or truncated is copied again.
+   Each run writes run-state.json at start, so even a crash-killed run keeps
+   its selection provable. rc3-made folders can be continued when their final
+   report exists. The original selection is kept on continue.
+2. Mid-file resume: files of 4 MiB or more copy in 8 MiB ranged reads
+   (adb exec-out dd). Completed chunk SHA-256s are recorded in a sidecar;
+   a later session re-hashes the partial and keeps it only up to the last
+   matching chunk. The whole-file triple hash check still gates every verified
+   file, and a mismatch discards the partial. Phones/ADB without ranged reads
+   fall back to whole-file copies with a warning.
+3. Windows sleep prevention: while a run is active the app calls
+   SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED). The request
+   ends with the run or the process; the screen may still turn off, and lid
+   closing, low battery or manual Sleep still interrupt the run.
+
+Testing: see TESTING.md. rc4 checks are again Linux simulations with a
+synthetic ADB process; no real phone or Windows PC ran this candidate. The
+keep-awake call is verified by code inspection only.
+
 ## 0.4.0-rc3, 2026-11-23, release candidate
 Requested by the owner after trying rc2 on his PC and phone:
 1. In-app notice: removed the sentence about the earlier user-reported run and

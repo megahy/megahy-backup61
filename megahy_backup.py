@@ -3,7 +3,7 @@
 # This program is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License version 3 or (at your option) any later
 # version. See LICENSE.txt.
-"""megahy-backup 0.4.0-rc3. Standard-library-only Android backup for Windows PCs."""
+"""megahy-backup 0.4.0-rc4. Standard-library-only Android backup for Windows PCs."""
 from __future__ import annotations
 import argparse
 import datetime as dt
@@ -34,7 +34,13 @@ from eta import CopyProgress
 # Keep cancellation types identical when launched as a script.
 sys.modules.setdefault('megahy_backup', sys.modules[__name__])
 BASE = Path(__file__).resolve().parent
-VERSION = '0.4.0-rc3'
+VERSION = '0.4.0-rc4'
+# Ranged chunked copy (mid-file resume): large files copy in CHUNK_SIZE reads
+# through `adb exec-out dd`, so a stop, disconnect or crash keeps the verified
+# chunks. The whole-file triple hash check still gates every verified file.
+CHUNK_SIZE = 8 * 1024 * 1024
+CHUNK_MIN = 4 * 1024 * 1024  # smaller files copy whole with adb pull
+RESUMABLE_PHASES = ('Stopped, incomplete', 'Error, incomplete')
 GAPS = [
     'This is a file backup, not a full phone clone or a reset-safety certificate.',
     'Private app data, installed apps, logins, passwords, authenticator secrets, WhatsApp/Signal chats, system settings and eSIMs are not extracted. Contacts, SMS, MMS and call-log provider exports are attempted only when the Android shell is already allowed to read them.',
@@ -44,7 +50,8 @@ GAPS = [
     'Only the chosen categories and folders are attempted. Media filters use filename extensions, not content. Hidden/cache exclusions may omit wanted files; they never delete or free space on the phone.',
     'A live phone is not a snapshot. Stop using it during backup, then check important files and each app backup before considering a reset.',
     'Incremental mode skips files whose size and modification time (or content hash) match an earlier verified backup in the same destination. It cannot detect every possible change; when in doubt, run with incremental off.',
-    'Backups are not encrypted by this app. Protect the backup disk. Restore copies verified files back to a phone folder you choose; it does not restore app data, contacts, messages or settings into their apps.'
+    'Backups are not encrypted by this app. Protect the backup disk. Restore copies verified files back to a phone folder you choose; it does not restore app data, contacts, messages or settings into their apps.',
+    'A continued (resumed) run trusts only files whose hashes were verified in its earlier sessions; everything else is copied and verified fresh. Files verified earlier captured the phone bytes at that time; the phone may have changed them since.'
 ]
 
 class BackupError(Exception):
@@ -55,6 +62,9 @@ class Cancelled(BackupError):
 
 class DeviceDisconnected(BackupError):
     pass
+
+class ChunkedUnavailable(BackupError):
+    """Ranged reads (adb exec-out dd) are not usable on this phone/ADB."""
 
 
 def local_path(p):
@@ -161,6 +171,41 @@ def pick_folder():
     return path
 
 
+class KeepAwake:
+    """Ask Windows not to idle-sleep while a run is active. No-op elsewhere.
+
+    The request is tied to this process: it ends on release() or when the
+    process exits, so a crash never leaves the PC pinned awake. Manual sleep,
+    lid closing and low battery still interrupt the run; that is what the
+    continue/resume support is for.
+    """
+    def __init__(self):
+        self.held = False
+
+    def _call(self, flag):
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(flag)
+
+    def acquire(self):
+        if self.held or os.name != 'nt':
+            return
+        try:
+            # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+            self._call(0x80000001)
+            self.held = True
+        except Exception:
+            self.held = False
+
+    def release(self):
+        if not self.held:
+            return
+        try:
+            self._call(0x80000000)  # ES_CONTINUOUS
+        except Exception:
+            pass
+        self.held = False
+
+
 class Engine:
     def __init__(self, adb=None):
         self.adb = adb
@@ -174,12 +219,14 @@ class Engine:
         self.resume_check = False
         self.lock = threading.Lock()
         self.previous = {}
+        self.chunked = None  # None = not probed yet this run
+        self.keep_awake = KeepAwake()
         self.state = dict(phase='Ready', detail='Connect one unlocked Android phone by USB, or use Wi-Fi.',
                           running=False, mode='backup',
                           total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder='',
                           warnings=[], recent=[], categories={}, scanned=0, excluded=0,
                           paused=False, pause_requested=False, selection=selection.defaults(),
-                          adb_setup=None)
+                          adb_setup=None, resumable=None, keep_awake=False, sessions=1)
 
     def update(self, **kw):
         with self.lock:
@@ -238,7 +285,7 @@ class Engine:
             if self.serial:
                 code, out, _ = self.invoke(['get-state'], timeout=15)
                 if code or out.strip() != b'device':
-                    raise DeviceDisconnected('Phone unavailable after Pause. This run is incomplete. Reconnect and start a new run; no partial file is verified.')
+                    raise DeviceDisconnected('Phone unavailable after Pause. This run is incomplete. Reconnect and continue this backup; no partial file is verified.')
         return self.invoke(args, timeout=timeout, device=device)
 
     def invoke(self, args, timeout=120, device=True):
@@ -458,6 +505,90 @@ class Engine:
         if used:
             self.update(detail='Incremental mode: loaded ' + str(len(self.previous)) + ' previously verified files from ' + str(used) + ' earlier backup(s).')
 
+    def _scan_roots(self):
+        """Roots used for the end-of-run change check, from the saved selection."""
+        if self.options['storage'] == 'none':
+            return []
+        if self.options['storage'] == 'folder':
+            return [selection.folder_scope(self.options['folder'])]
+        return [(label, root, root) for label, root in self.roots()]
+
+    def _chunked_ok(self):
+        """Probe once per run: adb exec-out plus phone dd with bs/skip/count."""
+        if self.chunked is not None:
+            return self.chunked
+        try:
+            code, out, err = self.run(['exec-out', 'dd', 'if=/dev/null', 'bs=1', 'skip=0', 'count=1'], timeout=30)
+            self.chunked = code == 0
+        except BackupError:
+            self.chunked = False
+        if not self.chunked:
+            self.warn('This phone or ADB cannot do ranged reads (adb exec-out dd). Large files are copied whole: Stop keeps every verified file, but a partly copied large file restarts from its beginning.')
+        return self.chunked
+
+    def _copy_chunked(self, remote, partial, sidecar, size):
+        """Copy one file in CHUNK_SIZE ranged reads, resuming verified chunks.
+
+        Each completed chunk's SHA-256 is recorded in the sidecar. A later
+        session re-hashes the existing .partial bytes against the sidecar and
+        keeps them only up to the last matching chunk. The whole-file triple
+        hash check in the caller still gates the verified status.
+        """
+        chunk = CHUNK_SIZE
+        entries = []
+        if sidecar.is_file():
+            try:
+                data = json.loads(sidecar.read_text(encoding='utf-8'))
+                if data.get('source') == remote and data.get('size') == size and data.get('chunk') == chunk:
+                    entries = [(str(h), int(n)) for h, n in data.get('chunks', [])]
+            except Exception:
+                entries = []
+        local_size = os.path.getsize(local_path(partial)) if partial.exists() else 0
+        offset = 0
+        good = 0
+        for h, n in entries:
+            if offset + n > local_size:
+                break
+            with open(local_path(partial), 'rb') as f:
+                f.seek(offset)
+                buf = f.read(n)
+            if len(buf) != n or hashlib.sha256(buf).hexdigest() != h:
+                break
+            offset += n
+            good += 1
+        entries = entries[:good]
+        if partial.exists() and local_size != offset:
+            with open(local_path(partial), 'r+b') as f:
+                f.truncate(offset)
+        if 0 < offset < size:
+            self.update(detail='Continuing inside ' + remote + ' from ' + str(offset // (1024 * 1024)) + ' MiB')
+        mode = 'r+b' if partial.exists() else 'w+b'
+        total_mib = (size + 1024 * 1024 - 1) // (1024 * 1024)
+        with open(local_path(partial), mode) as f:
+            while offset < size:
+                index = offset // chunk
+                want = min(chunk, size - offset)
+                code, out, err = self.run(['exec-out', 'dd', 'if=' + shlex.quote(remote),
+                                           'bs=' + str(chunk), 'skip=' + str(index), 'count=1'], timeout=900)
+                if code:
+                    message = err.decode('utf-8', 'replace')[:300]
+                    if re.search(r'unknown command|not found|no such', message, re.I):
+                        self.chunked = False
+                        raise ChunkedUnavailable(message)
+                    raise BackupError('Ranged read failed: ' + message)
+                if len(out) != want:
+                    raise BackupError('Phone returned a short ranged read (' + str(len(out)) + ' of ' + str(want) + ' bytes). The partial file is kept for the next continue.')
+                f.seek(offset)
+                f.write(out)
+                f.flush()
+                entries.append((hashlib.sha256(out).hexdigest(), len(out)))
+                offset += len(out)
+                tmp = sidecar.with_name(sidecar.name + '.tmp')
+                tmp.write_text(json.dumps({'source': remote, 'size': size, 'chunk': chunk,
+                                           'chunks': entries}, ensure_ascii=True), encoding='utf-8')
+                os.replace(local_path(tmp), local_path(sidecar))
+                self.update(detail=remote + ' · ' + str(offset // (1024 * 1024)) + ' of ' + str(total_mib) + ' MiB')
+
     def unchanged(self, remote, size, mtime):
         """Return the earlier record when this file is provably unchanged, else None."""
         prev = self.previous.get(remote)
@@ -474,7 +605,101 @@ class Engine:
                 return None
         return None
 
-    def start(self, destination, options=None):
+    @staticmethod
+    def _manifest_last_records(manifest):
+        """Last record per source path in a manifest (later sessions append)."""
+        last = {}
+        try:
+            with open(manifest, encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    source = record.get('source')
+                    if isinstance(source, str):
+                        last[source] = record
+        except OSError:
+            pass
+        return last
+
+    def _resumable_info(self, cand):
+        """Describe an interrupted backup folder, or None when it is not resumable.
+
+        A folder is resumable when its selection is provable (rc4 run-state.json,
+        or an rc3-style report.json that ended incomplete) and its manifest and
+        inventory exist. Finished folders and folders without selection proof
+        are never resumed.
+        """
+        manifest = cand / 'manifest.jsonl'
+        inventory = cand / 'inventory.json'
+        if not manifest.is_file() or not inventory.is_file():
+            return None
+        state_file = cand / 'run-state.json'
+        report = cand / 'report.json'
+        run_state = None
+        if state_file.is_file():
+            try:
+                run_state = json.loads(state_file.read_text(encoding='utf-8'))
+            except Exception:
+                return None
+        rep = {}
+        if report.is_file():
+            try:
+                rep = json.loads(report.read_text(encoding='utf-8'))
+            except Exception:
+                rep = {}
+            if rep.get('phase') == 'Finished with gaps':
+                return None
+        if run_state is None and rep.get('phase') not in RESUMABLE_PHASES:
+            return None  # no selection proof (for example killed before the report)
+        selection = (run_state or {}).get('selection') or rep.get('selection')
+        if not isinstance(selection, dict):
+            return None
+        try:
+            total = len(json.loads(inventory.read_text(encoding='utf-8')))
+        except Exception:
+            return None
+        last = self._manifest_last_records(manifest)
+        verified = sum(1 for r in last.values() if r.get('status') == 'verified')
+        skipped = sum(1 for r in last.values() if r.get('status') == 'skipped-unchanged')
+        failed = sum(1 for r in last.values() if r.get('status') not in ('verified', 'skipped-unchanged'))
+        device = (run_state or {}).get('device') or rep.get('device') or {}
+        return dict(name=cand.name, started=(run_state or {}).get('started') or rep.get('started'),
+                    sessions=(run_state or {}).get('sessions', 1),
+                    phase=rep.get('phase') or 'Interrupted before the final report',
+                    verified=verified, skipped=skipped, failed=failed, total=total,
+                    selection=selection, serial=device.get('serial'),
+                    scanned=(run_state or {}).get('scanned', rep.get('scanned')),
+                    excluded=(run_state or {}).get('excluded', rep.get('excluded')))
+
+    def find_resumable(self, destination):
+        """Newest resumable interrupted backup folder in a destination, or None."""
+        try:
+            destination = Path(destination).expanduser().resolve()
+            if not destination.is_dir():
+                return None
+            candidates = sorted((p for p in destination.glob('megahy-backup-*') if p.is_dir()),
+                                key=lambda p: p.name, reverse=True)
+        except OSError:
+            return None
+        for cand in candidates[:10]:
+            info = self._resumable_info(cand)
+            if info:
+                return info
+        return None
+
+    def start(self, destination, options=None, resume=None):
+        if resume:
+            destination_path = Path(destination).expanduser().resolve()
+            if not re.fullmatch(r'megahy-backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}', resume or ''):
+                raise ValueError('Choose an interrupted backup folder made by this app')
+            info = self._resumable_info(destination_path / resume)
+            if not info:
+                raise ValueError('That folder is not a resumable interrupted backup')
+            options = info['selection']  # a continued run keeps its original scope
+        else:
+            info = None
         options = selection.validate(options)
         with self.lock:
             if self.state['running']:
@@ -485,17 +710,27 @@ class Engine:
             self.options = options
             self.progress = CopyProgress()
             self.previous = {}
+            self.chunked = None
             self.state = dict(phase='Connecting', detail='Checking phone access...', running=True, mode='backup',
                               total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder='',
                               warnings=[], recent=[], categories={}, scanned=0, excluded=0,
                               paused=False, pause_requested=False, selection=json.loads(json.dumps(options)),
-                              adb_setup=self.state.get('adb_setup'))
-        threading.Thread(target=self.backup, args=(destination,), daemon=True).start()
+                              adb_setup=self.state.get('adb_setup'), resumable=None, keep_awake=False,
+                              sessions=(info or {}).get('sessions', 0) + 1)
+        self.keep_awake.acquire()
+        self.update(keep_awake=self.keep_awake.held)
+        if os.name == 'nt' and not self.keep_awake.held:
+            self.warn('Could not ask Windows to stay awake during this run. Stop the run and continue it later if the PC sleeps.')
+        threading.Thread(target=self.backup, args=(destination, resume), daemon=True).start()
         return True
 
-    def backup(self, destination):
+    def backup(self, destination, resume=None):
         folder = None
         records = None
+        prior = {}
+        trusted = 0
+        trusted_skipped = 0
+        resumed = resume is not None
         summary = dict(version=VERSION, started=dt.datetime.now().astimezone().isoformat(),
                        scope='Selected readable shared-storage files and selected permitted providers only. NOT a full phone backup.', gaps=GAPS, selection=self.options)
         try:
@@ -503,13 +738,43 @@ class Engine:
             summary['device'] = info
             destination = Path(destination).expanduser().resolve()
             destination.mkdir(parents=True, exist_ok=True)
-            # Separate new folder every time. Existing backups are never overwritten.
-            folder = destination / ('megahy-backup-' + dt.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3))
-            folder.mkdir()
+            if resumed:
+                # Continue the interrupted folder: verified files are trusted as-is,
+                # everything else is copied and verified fresh in this session.
+                folder = destination / resume
+                if not folder.is_dir():
+                    raise BackupError('The interrupted backup folder is no longer at the destination: ' + resume)
+                old_state = {}
+                old_report = {}
+                try:
+                    old_state = json.loads((folder / 'run-state.json').read_text(encoding='utf-8'))
+                except Exception:
+                    old_state = {}
+                try:
+                    old_report = json.loads((folder / 'report.json').read_text(encoding='utf-8'))
+                except Exception:
+                    old_report = {}
+                summary['started'] = old_state.get('started') or old_report.get('started') or summary['started']
+                summary['resumed'] = True
+                summary['sessions'] = self.snapshot()['sessions']
+                prior = self._manifest_last_records(folder / 'manifest.jsonl')
+                trusted = sum(1 for r in prior.values() if r.get('status') == 'verified')
+                trusted_skipped = sum(1 for r in prior.values() if r.get('status') == 'skipped-unchanged')
+                old_serial = (old_state.get('device') or {}).get('serial') or (old_report.get('device') or {}).get('serial')
+                if old_serial and self.serial and old_serial != self.serial:
+                    self.warn('This phone differs from the one in the interrupted run. Files verified earlier remain valid; pending files now come from the connected phone.')
+            else:
+                # Separate new folder every time. Existing backups are never overwritten.
+                folder = destination / ('megahy-backup-' + dt.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3))
+                folder.mkdir()
             if self.options['incremental'] and self.options['storage'] != 'none':
                 self.update(detail='Loading earlier backups for incremental mode...')
                 self.load_previous(destination, folder.name)
             self.update(folder=str(folder), detail=info['model'] + ' / Android ' + info['android'])
+            run_state = dict(version=VERSION, started=summary['started'], sessions=self.snapshot()['sessions'],
+                             selection=self.options, device=info,
+                             last_session=dt.datetime.now().astimezone().isoformat())
+            (folder / 'run-state.json').write_text(json.dumps(run_state, ensure_ascii=True, indent=2), encoding='utf-8')
             (folder / 'READ-FIRST.txt').write_text('\n\n'.join(GAPS), encoding='utf-8')
             # Local provider archives never write anything onto the phone.
             from autoexports import export_all
@@ -519,7 +784,20 @@ class Engine:
             scanned = 0
             scan_errors = 0
             excluded = dict(hidden=0, cache=0, type=0)
-            if self.options['storage'] != 'none':
+            if resumed:
+                # Reuse the interrupted run's scan; the phone is not re-scanned for
+                # the copy list. The end-of-run check still spots added/removed files.
+                try:
+                    inventory = [tuple(item) for item in json.loads((folder / 'inventory.json').read_text(encoding='utf-8'))]
+                except Exception:
+                    raise BackupError('The interrupted backup has no readable inventory.json, so it cannot be continued. Start a new backup instead.')
+                scan_roots = self._scan_roots()
+                scanned = old_state.get('scanned') or old_report.get('scanned') or len(inventory)
+                excluded = old_state.get('excluded_files') or old_report.get('excluded_files') or dict(hidden=0, cache=0, type=0)
+                self.update(total=len(inventory), scanned=scanned, excluded=sum(excluded.values()))
+                summary.update(scanned_files=scanned, selected_files=len(inventory), excluded_files=excluded)
+                self.update(detail='Continuing the interrupted backup: ' + str(trusted + trusted_skipped) + ' of ' + str(len(inventory)) + ' selected files already verified; the rest are copied and verified now.')
+            elif self.options['storage'] != 'none':
                 self.update(phase='Scanning selected storage')
                 code, out, err = self.shell('sha256sum /dev/null')
                 if code or not re.match(rb'[0-9a-fA-F]{64}', out):
@@ -560,33 +838,75 @@ class Engine:
                     self.warn('Hidden/cache exclusions were selected. These can omit wanted files, including media. Nothing was deleted from the phone.')
             if self.options['storage'] == 'none' and not any(r.get('records', 0) or r.get('exported_vcards', 0) or r.get('attachments_saved', 0) for r in self.snapshot()['categories'].values()):
                 raise BackupError('No selected provider records were exported. Review whether the category is empty, partial or unavailable. Nothing from shared storage was requested.')
-            (folder / 'inventory.json').write_text(json.dumps(inventory, ensure_ascii=True, indent=2), encoding='utf-8')
-            summary.update(scanned_files=scanned, selected_files=len(inventory), excluded_files=excluded)
+            if not resumed:
+                (folder / 'inventory.json').write_text(json.dumps(inventory, ensure_ascii=True, indent=2), encoding='utf-8')
+                summary.update(scanned_files=scanned, selected_files=len(inventory), excluded_files=excluded)
+                run_state.update(scanned=scanned, excluded_files=excluded, total=len(inventory))
+                (folder / 'run-state.json').write_text(json.dumps(run_state, ensure_ascii=True, indent=2), encoding='utf-8')
             sizes = {}
             mtimes = {}
+            pending_inventory = [item for item in inventory if not (prior.get(item[2]) and prior[item[2]].get('status') in ('verified', 'skipped-unchanged'))]
             if inventory:
                 self.update(phase='Measuring selected file sizes', detail='Preparing byte counts for a rough ETA...')
-                sizes, mtimes = self.measure_meta(inventory)
-                (folder / 'source-sizes-reference.json').write_text(json.dumps(sizes, ensure_ascii=True, indent=2), encoding='utf-8')
+                sizes, mtimes = self.measure_meta(pending_inventory)
+                if not resumed:
+                    (folder / 'source-sizes-reference.json').write_text(json.dumps(sizes, ensure_ascii=True, indent=2), encoding='utf-8')
                 self.progress.begin(sizes)
-                # Free-space precheck against measured selected bytes.
+                # Free-space precheck against measured bytes still to copy.
                 known = sum(n for n in sizes.values() if n is not None)
                 if self.previous:
-                    pending = sum(sizes.get(r, 0) or 0 for _, _, r in inventory
+                    pending = sum(sizes.get(r, 0) or 0 for _, _, r in pending_inventory
                                   if not (sizes.get(r) is not None and self.previous.get(r)
                                           and self.previous[r].get('bytes') == sizes.get(r)
                                           and self.previous[r].get('mtime') and mtimes.get(r)
                                           and self.previous[r]['mtime'] == mtimes.get(r)))
                 else:
                     pending = known
+                if resumed:
+                    # Bytes already inside .partial files need no new disk space.
+                    check_mapper = NameMapper()
+                    for label, root, remote in pending_inventory:
+                        part = folder / 'files' / check_mapper.map(label + '/' + remote[len(root):])
+                        part = part.with_name(part.name + '.partial')
+                        try:
+                            pending -= os.path.getsize(local_path(part))
+                        except OSError:
+                            pass
+                    pending = max(0, pending)
                 free = shutil.disk_usage(str(destination)).free
                 if pending and free < pending + 64 * 1024 * 1024:
                     raise BackupError('Not enough free disk space at the destination: about ' + str(pending // (1024 * 1024)) + ' MiB are needed for this selection but only ' + str(free // (1024 * 1024)) + ' MiB are free. Free space or choose another folder.')
-            records = open(folder / 'manifest.jsonl', 'w', encoding='utf-8')
+            records = open(folder / 'manifest.jsonl', 'a' if resumed else 'w', encoding='utf-8')
+            if resumed:
+                records.write(json.dumps({'session_marker': self.snapshot()['sessions'],
+                                          'resumed_at': dt.datetime.now().astimezone().isoformat()},
+                                         ensure_ascii=True) + '\n')
+                records.flush()
+                with self.lock:
+                    self.state['verified'] = trusted
+                    self.state['skipped'] = trusted_skipped
+                    self.state['failed'] = 0
             mapper = NameMapper()
             self.update(phase='Copying and verifying')
             for index, (label, root, remote) in enumerate(inventory, 1):
                 self.update(detail=remote, done=index-1)
+                prior_record = prior.get(remote)
+                if prior_record and prior_record.get('status') in ('verified', 'skipped-unchanged'):
+                    # Verified (or proven unchanged) in an earlier session of this
+                    # same backup: trusted as-is, not re-copied or re-hashed now.
+                    # Exception: if the verified PC copy vanished or shrank, re-copy.
+                    trusted_here = prior_record['status'] == 'skipped-unchanged'
+                    if not trusted_here and prior_record.get('local'):
+                        try:
+                            present = (folder / prior_record['local']).is_file()
+                            size_ok = (prior_record.get('bytes') is None or
+                                       os.path.getsize(local_path(folder / prior_record['local'])) == prior_record['bytes'])
+                            trusted_here = present and size_ok
+                        except OSError:
+                            trusted_here = False
+                    if trusted_here:
+                        self.update(done=index)
+                        continue
                 record = dict(source=remote, storage=label, status='failed')
                 partial = None
                 try:
@@ -612,20 +932,48 @@ class Engine:
                     record['local'] = str(Path('files') / rel)
                     os.makedirs(local_path(target.parent), exist_ok=True)
                     partial = target.with_name(target.name + '.partial')
+                    sidecar = Path(str(partial) + '.progress.json')
+                    size = sizes.get(remote)
+                    used_chunked = False
                     before = self.remote_hash(remote)
-                    code, out, err = self.run(['pull', '-a', remote, local_path(partial)], timeout=7200)
-                    if code:
-                        error_text = err.decode('utf-8', 'replace')
-                        # adb writes the PC file itself, so ENOSPC can arrive as
-                        # stderr rather than a Python OSError in this process.
-                        if re.search(r'no space left on device|disk (?:is )?full|not enough space|insufficient disk space|\bENOSPC\b', error_text, re.I):
-                            raise OSError(28, 'PC disk is full during ADB pull')
-                        raise BackupError('Copy failed: ' + error_text[:600])
+                    if size is not None and size >= CHUNK_MIN and self._chunked_ok():
+                        used_chunked = True
+                        try:
+                            self._copy_chunked(remote, partial, sidecar, size)
+                        except ChunkedUnavailable:
+                            used_chunked = False
+                            self.warn('Ranged copy is unavailable on this phone/ADB. Copying whole files for the rest of this run; Stop still keeps every verified file, but a partly copied large file restarts from its beginning.')
+                    if not used_chunked:
+                        code, out, err = self.run(['pull', '-a', remote, local_path(partial)], timeout=7200)
+                        if code:
+                            error_text = err.decode('utf-8', 'replace')
+                            # adb writes the PC file itself, so ENOSPC can arrive as
+                            # stderr rather than a Python OSError in this process.
+                            if re.search(r'no space left on device|disk (?:is )?full|not enough space|insufficient disk space|\bENOSPC\b', error_text, re.I):
+                                raise OSError(28, 'PC disk is full during ADB pull')
+                            raise BackupError('Copy failed: ' + error_text[:600])
                     pc_hash = digest(partial)
                     after = self.remote_hash(remote)
                     record.update(source_sha256_before=before, source_sha256_after=after, local_sha256=pc_hash)
                     if before != after or before != pc_hash:
+                        # Never trust this assembled partial again: a chunked partial
+                        # can hold bytes from different phone states across sessions.
+                        if used_chunked:
+                            for stale in (partial, sidecar):
+                                try:
+                                    os.unlink(local_path(stale))
+                                except OSError:
+                                    pass
+                        else:
+                            try:
+                                os.unlink(local_path(sidecar))
+                            except OSError:
+                                pass
                         raise BackupError('Hash mismatch or source changed during copy. File is not verified.')
+                    try:
+                        os.unlink(local_path(sidecar))
+                    except OSError:
+                        pass
                     os.replace(local_path(partial), local_path(target))
                     # Preserve the phone's modification date on the PC copy.
                     if mtimes.get(remote):
@@ -657,7 +1005,7 @@ class Engine:
                         raise BackupError('PC disk is full. This backup is incomplete.')
                     connected, _, _ = self.run(['get-state'], timeout=15)
                     if connected:
-                        raise BackupError('Phone disconnected. This backup is incomplete. Reconnect and start a new run.')
+                        raise BackupError('Phone disconnected. This backup is incomplete. Reconnect and continue this backup.')
                 finally:
                     if record.get('status') != 'skipped-unchanged':
                         records.write(json.dumps(record, ensure_ascii=True) + '\n')
@@ -680,9 +1028,13 @@ class Engine:
                 self.warn('No contacts vCards were exported or found in verified storage copies. Contacts have NOT been confirmed backed up.')
             self.update(phase='Finished with gaps', detail='Review the report. This is not proof that the phone is safe to reset.')
         except Cancelled:
-            self.update(phase='Stopped, incomplete', detail='The run stopped. Already verified files remain; do not treat this as a complete backup.')
+            resumable = (self._resumable_info(folder) or {}).get('name') if folder else None
+            self.update(phase='Stopped, incomplete',
+                        detail='The run stopped. Already verified files remain; do not treat this as a complete backup. You can continue this backup later from where it stopped.',
+                        resumable=resumable)
         except Exception as e:
-            self.update(phase='Error, incomplete', detail=str(e))
+            resumable = (self._resumable_info(folder) or {}).get('name') if folder else None
+            self.update(phase='Error, incomplete', detail=str(e), resumable=resumable)
         finally:
             final_categories = self.snapshot()['categories']
             for name, result in final_categories.items():
@@ -697,6 +1049,17 @@ class Engine:
             if folder:
                 summary.update(self.snapshot())
                 summary.update(running=False, paused=False, pause_requested=False)
+                # Report the folder's real state: the last manifest record per file,
+                # across every session of a continued backup.
+                try:
+                    last = self._manifest_last_records(folder / 'manifest.jsonl')
+                    if last:
+                        summary['verified'] = sum(1 for r in last.values() if r.get('status') == 'verified')
+                        summary['skipped'] = sum(1 for r in last.values() if r.get('status') == 'skipped-unchanged')
+                        summary['failed'] = sum(1 for r in last.values() if r.get('status') not in ('verified', 'skipped-unchanged'))
+                        self.update(verified=summary['verified'], skipped=summary['skipped'], failed=summary['failed'])
+                except Exception:
+                    pass
                 summary['finished'] = dt.datetime.now().astimezone().isoformat()
                 try:
                     category_path = folder / 'automatic-exports' / 'category-report.json'
@@ -715,11 +1078,15 @@ class Engine:
                           'AUTOMATIC PROVIDER CATEGORIES (not restore-tested):', json.dumps(summary['categories'], ensure_ascii=True, indent=2), '',
                           'WARNINGS:', *summary['warnings'], '', 'ALWAYS EXCLUDED / NOT GUARANTEED:', *GAPS,
                           '', 'See manifest.jsonl for per-file paths, hashes, dates and failures. See inventory.json for discovered files.'])
+                    if resumed:
+                        text += ('\n\nCONTINUED BACKUP: this folder resumed after an interruption (session ' +
+                                 str(summary.get('sessions', 1)) + '). Files verified in earlier sessions were trusted as they are, not re-copied or re-hashed in this one; pending and failed files were copied and verified fresh. The phone may have changed files since their original verification.')
                     (folder / 'REPORT.txt').write_text(text, encoding='utf-8')
                 except Exception as e:
                     self.update(phase='Error, incomplete', detail='Could not write the final report: ' + str(e))
+            self.keep_awake.release()
             self.resume_gate.set()
-            self.update(running=False, paused=False, pause_requested=False)
+            self.update(running=False, paused=False, pause_requested=False, keep_awake=False)
 
     # ----- Restore (copies verified files back to the phone; writes to the phone) -----
 
@@ -762,7 +1129,9 @@ class Engine:
                               total=0, done=0, verified=0, failed=0, skipped=0, vcf=0, folder=str(folder),
                               warnings=[], recent=[], categories={}, scanned=0, excluded=0,
                               paused=False, pause_requested=False, selection=selection.defaults(),
-                              adb_setup=self.state.get('adb_setup'))
+                              adb_setup=self.state.get('adb_setup'), resumable=None, keep_awake=False, sessions=1)
+        self.keep_awake.acquire()
+        self.update(keep_awake=self.keep_awake.held)
         threading.Thread(target=self.restore, args=(folder, target), daemon=True).start()
         return True
 
@@ -850,8 +1219,9 @@ class Engine:
                     records.close()
                 except Exception:
                     pass
+            self.keep_awake.release()
             self.resume_gate.set()
-            self.update(running=False, paused=False, pause_requested=False)
+            self.update(running=False, paused=False, pause_requested=False, keep_awake=False)
 
 
 def serve(engine, port=0, open_browser=True):
@@ -923,12 +1293,21 @@ def serve(engine, port=0, open_browser=True):
                     if not isinstance(destination, str) or not destination.strip():
                         raise ValueError('Choose a backup folder')
                     options = selection.validate(data.get('selection'))
-                    if not engine.start(destination.strip(), options):
+                    resume = data.get('resume')
+                    if resume is not None and not isinstance(resume, str):
+                        raise ValueError('Invalid resume folder')
+                    if not engine.start(destination.strip(), options, resume=resume):
                         return self.reply(409, {'error': 'A backup is already running'})
                     saved = persisted()
                     saved['destination'] = destination.strip()
                     saved['selection'] = options
                     app_settings.save(BASE, saved)
+                elif self.path == '/api/resumable':
+                    destination = data.get('destination')
+                    if not isinstance(destination, str) or not destination.strip():
+                        raise ValueError('Choose a backup folder')
+                    self.reply(200, {'ok': True, 'resumable': engine.find_resumable(destination.strip())})
+                    return
                 elif self.path == '/api/pause':
                     engine.request_pause()
                 elif self.path == '/api/resume':

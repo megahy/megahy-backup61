@@ -1,7 +1,7 @@
-megahy-backup 0.4.0-rc3 source
+megahy-backup 0.4.0-rc4 source
 ==============================
-This archive holds the Python, HTML and launcher source for the rc3 Windows
-release (megahy-backup-0.4.0-rc3-windows-x64.zip). It is the same set of files
+This archive holds the Python, HTML and launcher source for the rc4 Windows
+release (megahy-backup-0.4.0-rc4-windows-x64.zip). It is the same set of files
 as in that ZIP, without the bundled Python runtime.
 
 Build / run notes

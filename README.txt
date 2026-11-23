@@ -1,4 +1,4 @@
-megahy-backup 0.4.0-rc3
+megahy-backup 0.4.0-rc4
 RELEASE CANDIDATE. New features are simulation-tested only.
 Start with README.md for supported PCs, rights and current test status.
 
@@ -72,15 +72,39 @@ START, PAUSE, RESUME, STOP
    A file copied but not fully checked stays .partial and is not counted verified.
 4. Keep the cable connected while paused. Pause is NOT permission to unplug.
    Resume checks the pinned device again. If it is unavailable, the run ends
-   incomplete; reconnect and start a new run. If the same phone was reconnected
-   and is available, pending reads can continue, but changed files can fail
-   their hashes. Earlier copies are not revalidated as a phone-wide snapshot.
-5. Resume continues only this still-open running session. It does not resume
-   after closing the console, rebooting, an error or Stop. For repeat backups,
-   use Incremental mode instead: unchanged files are skipped.
-6. Stop ends the current run, including while paused. Already verified files
-   remain. In-flight files are not called verified. A later Start creates a new
-   backup; it does not continue the stopped one.
+   incomplete; reconnect and continue the backup from the status card or the
+   next Start. Changed files can fail their hashes. Earlier copies are not
+   revalidated as a phone-wide snapshot.
+5. Resume continues only this still-open running session.
+6. Stop ends the current session, including while paused. Already verified
+   files stay verified. In-flight files are not called verified.
+
+CONTINUING AN INTERRUPTED BACKUP (NEW IN 0.4.0-rc4)
+- After Stop, a disconnect, an error, a crash or PC sleep, the same backup can
+  continue instead of starting over. Start with the same destination: the app
+  finds the newest interrupted folder and offers to continue it or start new.
+  After a stopped or failed run the status card also shows Continue.
+- Continuing keeps that backup's original selection. Files already
+  hash-verified are trusted as they are: not re-copied, not re-hashed. Files
+  that failed or never finished are copied and verified fresh. If a verified
+  PC copy was deleted or truncated, that file is copied again.
+- Large files (4 MiB or more) copy in 8 MiB ranged reads (adb exec-out dd).
+  A stop inside a large file keeps its verified chunks; continuing reads only
+  the missing part. Chunk hashes are recorded in a .progress.json sidecar and
+  re-checked against the partial bytes before they are trusted. Every file
+  still passes the full SHA-256 check on the phone before and after copying
+  and on the PC before it is marked verified; a mismatch discards the partial.
+- If ranged reads are unsupported by the phone or ADB, files copy whole and a
+  partly copied large file restarts from its beginning. Verified files are
+  kept either way.
+- Folders made by 0.4.0-rc3 can be continued when their final report exists
+  (Stop or error, not a power kill). Older or unprovable folders are refused.
+- While a run is active the app asks Windows not to sleep; the screen may
+  still turn off. Closing the lid, low battery or choosing Sleep yourself
+  still interrupts the run; continue it afterwards.
+- A continued folder's REPORT.txt says how many sessions ran. Files verified
+  in an earlier session captured the phone's bytes at that time; the phone may
+  have changed them since.
 
 COPY TIME LEFT IS AN ESTIMATE
 After scanning, the app optionally measures selected file sizes in batches.
@@ -138,6 +162,14 @@ source-sizes-reference.json (optional measured sizes for the ETA, not a snapshot
   before a storage file is marked verified. Provider exports do not have this
   source-versus-PC checksum/completeness proof.
 
+NEW IN 0.4.0-rc4
+- Continue an interrupted backup: Stop, disconnect, error, crash or PC sleep
+  no longer force a new folder. Verified files stay trusted; the rest is
+  copied and verified fresh. See CONTINUING AN INTERRUPTED BACKUP above.
+- Mid-file resume: large files copy in ranged 8 MiB reads and keep verified
+  chunks across stops.
+- The app asks Windows not to sleep while a run copies.
+
 NEW IN 0.4.0
 - Incremental backup (on by default): skips files proven unchanged since an
   earlier verified backup in the same destination. Proof is size+modification
@@ -170,12 +202,12 @@ filenames are not encrypted; protect your PC disk. Disable USB debugging when
 finished. Keep enough disk space; a recognized full-disk ADB error aborts the run.
 
 TESTING
-0.4.0-rc3: 23 automated checks passed on Linux with a synthetic ADB device,
-re-running the core backup suite plus the two rc3 changes (see TESTING.md).
-The Browse picker front-of-browser fix is verified by code inspection only and
-awaits a real Windows PC. rc2 had 27 checks; rc1 had 39. Historic v0.3.0: 55
-automated regression tests and 33 scenario checks. These are software
-simulations, not a real phone success rate.
+0.4.0-rc4: 40 automated checks passed on Linux with a synthetic ADB device,
+covering the continue/resume and keep-awake changes (see TESTING.md). The
+keep-awake request and the rc3 Browse picker fix are verified by code
+inspection only and await a real Windows PC. rc3 had 23 checks; rc2 had 27;
+rc1 had 39. Historic v0.3.0: 55 automated regression tests and 33 scenario
+checks. These are software simulations, not a real phone success rate.
 Tests ran on Linux/Python 3.10.12 with a separate synthetic ADB command process.
 The new Windows runtime/launcher, real ADB/USB, real Android providers,
 phone completeness, multi-GB files, huge libraries and restoration are untested.
