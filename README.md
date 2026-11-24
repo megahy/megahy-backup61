@@ -1,5 +1,6 @@
 # megahy-backup
-<img width="944" height="310" alt="image" src="https://github.com/user-attachments/assets/509c84c9-1b26-4608-a00f-fa198b4c1dc5" />
+<img width="865" height="410" alt="image" src="https://github.com/user-attachments/assets/caeca169-e6bb-449d-b8d6-1b5d06e4804c" />
+<img width="832" height="415" alt="image" src="https://github.com/user-attachments/assets/8c7e885e-a1c1-4e86-9009-b73324c03ea4" />
 <img width="879" height="424" alt="image" src="https://github.com/user-attachments/assets/db3f847c-ea28-4449-8f95-234a6bd47373" />
 <img width="818" height="416" alt="image" src="https://github.com/user-attachments/assets/1b1cbe52-9540-417f-9fc6-0c6750aba7e5" />
 <img width="825" height="416" alt="image" src="https://github.com/user-attachments/assets/7229c662-84a7-4cb7-825d-0854e2e39885" />
