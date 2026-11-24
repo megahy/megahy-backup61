@@ -1,11 +1,6 @@
 # megahy-backup
-<img width="865" height="410" alt="image" src="https://github.com/user-attachments/assets/caeca169-e6bb-449d-b8d6-1b5d06e4804c" />
-<img width="832" height="415" alt="image" src="https://github.com/user-attachments/assets/8c7e885e-a1c1-4e86-9009-b73324c03ea4" />
-<img width="879" height="424" alt="image" src="https://github.com/user-attachments/assets/db3f847c-ea28-4449-8f95-234a6bd47373" />
-<img width="818" height="416" alt="image" src="https://github.com/user-attachments/assets/1b1cbe52-9540-417f-9fc6-0c6750aba7e5" />
-<img width="825" height="416" alt="image" src="https://github.com/user-attachments/assets/7229c662-84a7-4cb7-825d-0854e2e39885" />
-<img width="825" height="416" alt="image" src="https://github.com/user-attachments/assets/bb4707a1-020d-422e-b09a-73fdeb09d4c0" />
-<img width="807" height="412" alt="image" src="https://github.com/user-attachments/assets/3309a29d-e8f2-42dd-8c38-f39e54803e29" />
+
+<img width="1917" height="4285" alt="image" src="https://github.com/user-attachments/assets/bc9503bc-a2ab-4e14-b06a-737597d7883a" />
 
 *0.4.0-rc6 | Release candidate. New features tested in simulation only, not yet on a real phone.*
 Selective Android backup for Windows PCs, by Marwan Megahy. Built with help from an AI assistant and tested by the author.
